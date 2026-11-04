@@ -203,6 +203,21 @@ Response data:
 
 `debugOtp` appears only in local debug mode.
 
+For a Render development deployment, configure these environment variables:
+
+```ini
+AUTH_DEBUG_OTP=true
+DEBUG_OTP=123456
+```
+
+With debug mode enabled, the request-OTP response includes `debugOtp`, and the Render logs contain:
+
+```text
+[OTP DEBUG] otp=123456
+```
+
+This is an explicit development/testing bypass. Disable `AUTH_DEBUG_OTP` before production use.
+
 ### POST `/auth/login/verify-otp`
 
 Request:

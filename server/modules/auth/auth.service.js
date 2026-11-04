@@ -50,7 +50,11 @@ export const requestOtp = async ({ managerName, mobileNumber, deviceId, requestI
     requestId,
   });
 
-  console.log(`OTP challenge created for ${normalizedMobile}: ${env.debugOtpEnabled ? otp : "sent through provider"}`);
+  if (env.debugOtpEnabled) {
+    console.log(`[OTP DEBUG] otp=${otp}`);
+  } else {
+    console.log(`OTP challenge created for ${normalizedMobile}: sent through provider`);
+  }
   return {
     challengeId,
     expiresAt: expiresAt.toISOString(),

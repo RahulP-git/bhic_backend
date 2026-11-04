@@ -16,11 +16,15 @@ export const env = {
   otpTtlMs: toPositiveInteger(process.env.OTP_TTL_MS, 5 * 60 * 1000),
   otpMaxAttempts: toPositiveInteger(process.env.OTP_MAX_ATTEMPTS, 5),
   debugOtp: process.env.DEBUG_OTP || "123456",
-  debugOtpEnabled: process.env.AUTH_DEBUG_OTP === "true" && process.env.NODE_ENV !== "production",
+  debugOtpEnabled: process.env.AUTH_DEBUG_OTP === "true",
   paymentDebugMode: process.env.PAYMENT_DEBUG_MODE === "true" && process.env.NODE_ENV !== "production",
   nodeEnv: process.env.NODE_ENV || "development",
 };
 
 if (!env.mongodbUri) {
   throw new Error("MONGODB_URI is required in .env");
+}
+
+if (!/^\d{6}$/.test(env.debugOtp)) {
+  throw new Error("DEBUG_OTP must contain exactly 6 digits");
 }
