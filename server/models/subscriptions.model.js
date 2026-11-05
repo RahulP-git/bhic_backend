@@ -5,7 +5,7 @@ const orders = () => getDatabase().collection("subscription_orders");
 const subscriptions = () => getDatabase().collection("manager_subscriptions");
 
 export const findPlan = (planId) => plans().findOne({ planId, active: true });
-export const createPlanIfMissing = () => plans().updateOne({ planId: "monthly-999" }, { $setOnInsert: { planId: "monthly-999", name: "BHIC Manager Monthly", amount: 99900, currency: "INR", billingPeriod: "MONTH", active: true, entitlements: ["GROUP_MANAGEMENT"] } }, { upsert: true });
+export const createPlanIfMissing = () => plans().updateOne({ planId: "monthly-999" }, { $setOnInsert: { planId: "monthly-999", name: "BHIC Manager Monthly", amount: 999, currency: "INR", billingPeriod: "MONTH", active: true, entitlements: ["GROUP_MANAGEMENT"] } }, { upsert: true });
 export const createOrder = (order) => orders().insertOne(order);
 export const findOrder = (id, managerId) => orders().findOne({ _id: id, managerId });
 export const updateOrder = (id, updates) => orders().findOneAndUpdate({ _id: id }, { $set: { ...updates, updatedAt: new Date() } }, { returnDocument: "after" });

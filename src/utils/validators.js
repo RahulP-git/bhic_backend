@@ -50,12 +50,11 @@ const validateAmount = (amount, field = "amount", allowNegative = false) => {
   if (str.includes(".") && str.split(".")[1].length > 2) {
     throw createError.validation(`${field} must have at most 2 decimal places`);
   }
-  return Math.round(num * 100); // Return in smallest units (paise)
+  return Number(num.toFixed(2)); // Store and return amounts in rupees
 };
 
-// Convert paise to rupees
-const paiseToRupees = (paise) => Number((paise / 100).toFixed(2));
-const rupeesToPaise = (rupees) => Math.round(Number(rupees) * 100);
+// Normalize a stored rupee amount
+const normalizeAmount = (amount) => Number(Number(amount).toFixed(2));
 
 // Validate enum
 const validateEnum = (value, allowed, field = "value") => {
@@ -134,8 +133,7 @@ export {
   normalizePhone,
   validateName,
   validateAmount,
-  paiseToRupees,
-  rupeesToPaise,
+  normalizeAmount,
   validateEnum,
   validateDate,
   validateOtp,

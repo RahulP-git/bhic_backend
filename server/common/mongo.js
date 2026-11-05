@@ -18,7 +18,7 @@ export const serialize = (value) => {
   return value;
 };
 
-export const moneyToPaise = (value, field = "amount") => {
+export const moneyToRupees = (value, field = "amount") => {
   if (typeof value !== "number" && typeof value !== "string") {
     throw new AppError("VALIDATION_ERROR", `${field} must be a number`, 400);
   }
@@ -26,14 +26,14 @@ export const moneyToPaise = (value, field = "amount") => {
   if (!/^\d+(\.\d{1,2})?$/.test(text)) {
     throw new AppError("VALIDATION_ERROR", `${field} must be a non-negative amount with up to 2 decimals`, 400);
   }
-  const paise = Math.round(Number(text) * 100);
-  if (!Number.isSafeInteger(paise)) {
+  const rupees = Number(Number(text).toFixed(2));
+  if (!Number.isSafeInteger(Math.round(rupees * 100))) {
     throw new AppError("VALIDATION_ERROR", `${field} is too large`, 400);
   }
-  return paise;
+  return rupees;
 };
 
-export const paiseToMoney = (paise) => Number((paise / 100).toFixed(2));
+export const roundRupees = (rupees) => Number(Number(rupees || 0).toFixed(2));
 
 export const parseDate = (value, field) => {
   if (!value || Number.isNaN(new Date(value).getTime())) {

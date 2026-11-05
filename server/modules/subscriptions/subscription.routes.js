@@ -19,13 +19,13 @@ subscriptionRouter.post("/orders", asyncHandler(async (req, res) => {
   const plan = await findPlan(planId);
   if (!plan) throw new AppError("NOT_FOUND", "Subscription plan not found", 404);
   const existing = await getDatabase().collection("subscription_orders").findOne({ managerId: req.auth.user._id, idempotencyKey });
-  if (existing) return successResponse(res, { localOrderId: existing._id.toString(), providerOrderId: existing.providerOrderId, amount: existing.amount / 100, currency: existing.currency, status: existing.status });
+  if (existing) return successResponse(res, { localOrderId: existing._id.toString(), providerOrderId: existing.providerOrderId, amount: existing.amount, currency: existing.currency, status: existing.status });
   if (!env.paymentDebugMode && (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)) throw new AppError("PROVIDER_ERROR", "Razorpay credentials are not configured", 502);
   const localOrderId = crypto.randomUUID();
   const providerOrderId = env.paymentDebugMode ? `debug_order_${crypto.randomUUID()}` : `razorpay_order_${crypto.randomUUID()}`;
   const order = { managerId: req.auth.user._id, planId: plan.planId, amount: plan.amount, currency: plan.currency, providerOrderId, status: "CREATED", idempotencyKey, createdAt: new Date(), updatedAt: new Date(), localOrderId };
   const result = await createOrder(order);
-  successResponse(res, { localOrderId: result.insertedId.toString(), providerOrderId, amount: plan.amount / 100, currency: plan.currency, status: order.status, debugMode: env.paymentDebugMode }, 201);
+  successResponse(res, { localOrderId: result.insertedId.toString(), providerOrderId, amount: plan.amount, currency: plan.currency, status: order.status, debugMode: env.paymentDebugMode }, 201);
 }));
 
 subscriptionRouter.post("/payments/verify", asyncHandler(async (req, res) => {

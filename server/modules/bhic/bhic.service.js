@@ -1,5 +1,5 @@
 import { AppError } from "../../common/errors.js";
-import { moneyToPaise, paiseToMoney, parseDate, serialize, toObjectId } from "../../common/mongo.js";
+import { moneyToRupees, parseDate, roundRupees, serialize, toObjectId } from "../../common/mongo.js";
 import { normalizeMobileNumber, optionalString, requireString } from "../../common/validation.js";
 import { getDatabase } from "../../db/mongo.js";
 import { createWhatsAppMessage } from "../../models/whatsapp-messages.model.js";
@@ -55,9 +55,9 @@ const validateGroupInput = (body) => {
   const timezone = requireString(body.timezone || "Asia/Kolkata", "timezone", { min: 3, max: 100 });
   const frequency = body.frequency || "MONTHLY";
   if (frequency !== "MONTHLY") throw new AppError("VALIDATION_ERROR", "Only MONTHLY frequency is supported", 400);
-  const contributionAmount = moneyToPaise(body.contributionAmount, "contributionAmount");
-  const totalBhicAmount = moneyToPaise(body.totalBhicAmount, "totalBhicAmount");
-  const controlledAmount = moneyToPaise(body.controlledAmount, "controlledAmount");
+  const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
+  const totalBhicAmount = moneyToRupees(body.totalBhicAmount, "totalBhicAmount");
+  const controlledAmount = moneyToRupees(body.controlledAmount, "controlledAmount");
   const memberLimit = Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
     throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
@@ -156,7 +156,7 @@ export const addGroupMember = async (groupId, body, user, requestId) => {
 };
 
 const queueMemberInformation = async (group, member, user) => {
-  const result = await createWhatsAppMessage({ memberId: member._id, groupId: group._id, messageType: "GROUP_INFORMATION", templateId: "group-information", recipientNumber: member.primaryContactNumber, status: "QUEUED", attemptCount: 0, queuedAt: now(), content: { groupName: group.name, managerName: user.managerName, contributionAmount: paiseToMoney(group.contributionAmount), startDate: group.startDate, startTime: group.startTime, rules: group.rules } });
+  const result = await createWhatsAppMessage({ memberId: member._id, groupId: group._id, messageType: "GROUP_INFORMATION", templateId: "group-information", recipientNumber: member.primaryContactNumber, status: "QUEUED", attemptCount: 0, queuedAt: now(), content: { groupName: group.name, managerName: user.managerName, contributionAmount: roundRupees(group.contributionAmount), startDate: group.startDate, startTime: group.startTime, rules: group.rules } });
   return { ...result, _id: result.insertedId };
 };
 
@@ -248,7 +248,7 @@ export const recordCashCollection = async (cycleId, body, userId, requestId) => 
   const memberId = toObjectId(body.memberId, "memberId");
   const participant = await findParticipant(cycle._id, memberId);
   if (!participant) throw new AppError("NOT_FOUND", "Member is not a participant in this cycle", 404);
-  const amount = moneyToPaise(body.amount, "amount");
+  const amount = moneyToRupees(body.amount, "amount");
   if (!amount) throw new AppError("VALIDATION_ERROR", "amount must be greater than zero", 400);
   if (amount > participant.outstandingAmount) throw new AppError("AMOUNT_MISMATCH", "Collection cannot exceed the outstanding amount", 400);
   const method = body.method || "CASH";
@@ -267,8 +267,8 @@ export const recordCashCollection = async (cycleId, body, userId, requestId) => 
   return toPublic({ ...item, _id: result.insertedId });
 };
 
-export const getCollections = async (cycleId, userId) => { const cycle = await ensureCycle(cycleId, userId); const items = await listCollections(cycle._id); return toPublic({ items, totals: { expected: paiseToMoney(cycle.expectedTotal), collected: paiseToMoney(cycle.totalCollected), outstanding: paiseToMoney(cycle.totalOutstanding) } }); };
-export const getCollectionSummary = async (cycleId, userId) => { const cycle = await ensureCycle(cycleId, userId); const participants = await listParticipants(cycle._id); return { expectedTotal: paiseToMoney(cycle.expectedTotal), collectedTotal: paiseToMoney(cycle.totalCollected), outstandingTotal: paiseToMoney(cycle.totalOutstanding), paidMemberCount: participants.filter((item) => item.collectionStatus === "PAID").length, partialMemberCount: participants.filter((item) => item.collectionStatus === "PARTIAL").length, unpaidMemberCount: participants.filter((item) => item.collectionStatus === "UNPAID").length }; };
+export const getCollections = async (cycleId, userId) => { const cycle = await ensureCycle(cycleId, userId); const items = await listCollections(cycle._id); return toPublic({ items, totals: { expected: roundRupees(cycle.expectedTotal), collected: roundRupees(cycle.totalCollected), outstanding: roundRupees(cycle.totalOutstanding) } }); };
+export const getCollectionSummary = async (cycleId, userId) => { const cycle = await ensureCycle(cycleId, userId); const participants = await listParticipants(cycle._id); return { expectedTotal: roundRupees(cycle.expectedTotal), collectedTotal: roundRupees(cycle.totalCollected), outstandingTotal: roundRupees(cycle.totalOutstanding), paidMemberCount: participants.filter((item) => item.collectionStatus === "PAID").length, partialMemberCount: participants.filter((item) => item.collectionStatus === "PARTIAL").length, unpaidMemberCount: participants.filter((item) => item.collectionStatus === "UNPAID").length }; };
 
 export const correctCashCollection = async (cycleId, collectionId, reason, userId, requestId) => {
   if (!reason || reason.trim().length < 5) throw new AppError("VALIDATION_ERROR", "A correction reason of at least 5 characters is required", 400);
@@ -296,8 +296,8 @@ export const saveWinner = async (cycleId, body, userId, requestId) => {
   const winnerMemberId = toObjectId(body.winnerMemberId, "winnerMemberId");
   const eligible = await eligibleWinners(cycleId, userId);
   if (!eligible.some((member) => member._id.toString() === winnerMemberId.toString())) throw new AppError("MEMBER_NOT_ELIGIBLE", "Selected member is not eligible", 400);
-  const winnerAmount = moneyToPaise(body.winnerAmount, "winnerAmount");
-  const receivedAmount = moneyToPaise(body.receivedAmount, "receivedAmount");
+  const winnerAmount = moneyToRupees(body.winnerAmount, "winnerAmount");
+  const receivedAmount = moneyToRupees(body.receivedAmount, "receivedAmount");
   if (!winnerAmount || !receivedAmount || receivedAmount > winnerAmount) throw new AppError("AMOUNT_MISMATCH", "receivedAmount must be positive and cannot exceed winnerAmount", 400);
   const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerAmount, receivedAmount, remainingAmount: winnerAmount - receivedAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
   const result = await createWinner(winner);
@@ -322,8 +322,8 @@ export const saveSettlement = async (cycleId, body, userId, requestId) => {
   const winner = await findWinner(cycle._id);
   if (!winner) throw new AppError("INVALID_STATE", "Winner must be selected first", 409);
   if (await findSettlement(cycle._id)) throw new AppError("CONFLICT", "Settlement already recorded", 409);
-  const actualAmount = moneyToPaise(body.actualAmount, "actualAmount");
-  const expectedAmount = moneyToPaise(body.expectedAmount, "expectedAmount");
+  const actualAmount = moneyToRupees(body.actualAmount, "actualAmount");
+  const expectedAmount = moneyToRupees(body.expectedAmount, "expectedAmount");
   if (expectedAmount !== winner.remainingAmount && expectedAmount !== winner.receivedAmount) throw new AppError("AMOUNT_MISMATCH", "expectedAmount does not match the winner record", 400);
   if (actualAmount !== expectedAmount) throw new AppError("AMOUNT_MISMATCH", "actualAmount must match expectedAmount", 400);
   const method = body.method || "CASH";
@@ -341,7 +341,7 @@ const calculateDistribution = (members, sourceAmount, interestRate) => {
   const remainder = sourceAmount - baseAmount * members.length;
   return members.map((member, index) => {
     const base = baseAmount + (index === 0 ? remainder : 0);
-    const interestAmount = Math.floor((base * interestRate) / 10000);
+    const interestAmount = roundRupees((base * interestRate) / 100);
     return { memberId: member._id, baseAmount: base, interestRate, interestAmount, finalAmount: base + interestAmount, status: "DRAFT" };
   });
 };
@@ -370,7 +370,7 @@ export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const rate = Number(group.rules?.defaultInterestRate || 0);
   if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new AppError("VALIDATION_ERROR", "Interest rate must be between 0 and 100", 400);
   const sourceAmount = Math.max(0, group.controlledAmount || cycle.remainingAmount || 0);
-  const itemInputs = calculateDistribution(members, sourceAmount, Math.round(rate * 100));
+  const itemInputs = calculateDistribution(members, sourceAmount, rate);
   const distribution = { cycleId: cycle._id, groupId: cycle.groupId, sourceAmount, status: "DRAFT", ruleVersionId: group.activeRuleVersion, totalCalculatedAmount: itemInputs.reduce((sum, item) => sum + item.finalAmount, 0), roundingAdjustment: 0, interestRate: rate, createdBy: userId, createdAt: now(), updatedAt: now() };
   const result = await createDistribution(distribution);
   await createDistributionItems(itemInputs.map((item) => ({ ...item, distributionId: result.insertedId, cycleId: cycle._id, createdAt: now(), updatedAt: now() })));
@@ -391,11 +391,11 @@ export const updateDistributionInputs = async (cycleId, body, userId, requestId)
   const distribution = await findDistribution(cycle._id);
   if (!distribution) throw new AppError("NOT_FOUND", "Distribution draft not found", 404);
   if (distribution.status !== "DRAFT") throw new AppError("INVALID_STATE", "Published distribution cannot be edited", 409);
-  const sourceAmount = body.sourceAmount === undefined ? distribution.sourceAmount : moneyToPaise(body.sourceAmount, "sourceAmount");
+  const sourceAmount = body.sourceAmount === undefined ? distribution.sourceAmount : moneyToRupees(body.sourceAmount, "sourceAmount");
   const interestRate = body.interestRate === undefined ? distribution.interestRate : Number(body.interestRate);
   if (!Number.isFinite(interestRate) || interestRate < 0 || interestRate > 100) throw new AppError("VALIDATION_ERROR", "interestRate must be between 0 and 100", 400);
   const members = await distributionMembers(cycle);
-  const itemInputs = calculateDistribution(members, sourceAmount, Math.round(interestRate * 100));
+  const itemInputs = calculateDistribution(members, sourceAmount, interestRate);
   const database = getDatabase();
   await database.collection("distribution_items").deleteMany({ distributionId: distribution._id });
   await createDistributionItems(itemInputs.map((item) => ({ ...item, distributionId: distribution._id, cycleId: cycle._id, createdAt: now(), updatedAt: now() })));
@@ -408,7 +408,7 @@ export const validateDistribution = async (cycleId, userId) => {
   const result = await getDistribution(cycleId, userId);
   const total = result.items.reduce((sum, item) => sum + item.finalAmount, 0);
   const valid = result.items.length > 0 && result.distribution.sourceAmount >= 0 && total >= 0;
-  return { valid, totalCalculatedAmount: paiseToMoney(total), sourceAmount: paiseToMoney(result.distribution.sourceAmount), errors: valid ? [] : ["Distribution has no valid items"] };
+  return { valid, totalCalculatedAmount: roundRupees(total), sourceAmount: roundRupees(result.distribution.sourceAmount), errors: valid ? [] : ["Distribution has no valid items"] };
 };
 
 export const publishDistribution = async (cycleId, userId, requestId) => {

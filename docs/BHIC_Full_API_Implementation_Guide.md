@@ -89,7 +89,21 @@ Request amounts are sent in rupees and may contain a maximum of two decimal plac
 }
 ```
 
-The backend stores financial values as integer paise to avoid floating-point errors. Financial values in low-level database records are therefore integer paise.
+The backend stores and returns financial values in rupees. For example, `1000` means ₹1,000 and must remain `1000` in MongoDB and API responses.
+
+If a database was created by an earlier version that stored paise, run the migration in dry-run mode first:
+
+```powershell
+node scripts/migrate-financial-values-to-rupees.js
+```
+
+After checking the output, apply it once:
+
+```powershell
+node scripts/migrate-financial-values-to-rupees.js --apply
+```
+
+Do not run the `--apply` command more than once. Take a MongoDB backup before applying it.
 
 Use these rules in Flutter:
 
