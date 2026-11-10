@@ -24,6 +24,10 @@ import {
 } from "../../models/sessions.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
 
+const log = (message, meta = {}) => {
+  console.log(`[AUTH] ${message} ${JSON.stringify(meta)}`);
+};
+
 const getUserForLogin = async (managerName, mobileNumber) => {
   const existingUser = await findUserByMobile(mobileNumber);
   if (existingUser) return existingUser;
@@ -75,9 +79,9 @@ export const requestOtp = async ({ managerName, fullName, mobileNumber, deviceId
   });
 
   if (env.debugOtpEnabled) {
-    console.log(`[OTP DEBUG] otp=${otp}`);
+    log("OTP_DEBUG", { challengeId, mobileNumber: normalizedMobile, otp });
   } else {
-    console.log(`OTP challenge created for ${normalizedMobile}: sent through provider`);
+    log("OTP_SENT", { challengeId, mobileNumber: normalizedMobile });
   }
   return {
     challengeId,
@@ -103,6 +107,7 @@ export const verifyOtp = async ({ challengeId, otp, deviceId, requestId }) => {
 
   if (hashValue(normalizedOtp) !== challenge.otpHash) {
     await updateChallenge(normalizedChallengeId, { attemptCount: challenge.attemptCount + 1 });
+    log("OTP_INVALID", { challengeId, attemptCount: challenge.attemptCount + 1 });
     throw new AppError("AUTH_REQUIRED", "OTP is invalid", 401);
   }
 
@@ -132,6 +137,7 @@ export const verifyOtp = async ({ challengeId, otp, deviceId, requestId }) => {
     requestId,
   });
 
+  log("LOGIN_SUCCESS", { userId: updatedUser._id.toString(), deviceId });
   return {
     accessToken,
     refreshToken,
@@ -188,8 +194,16 @@ export const verifyEmailOtp = async ({ userId, challengeId, otp }) => {
 };
 
 export const refreshSession = async (refreshToken, requestId) => {
-  const session = await findRefreshSession(hashValue(refreshToken));
-  if (!session) throw new AppError("AUTH_EXPIRED", "Refresh token is invalid or expired", 401);
+  const hashedToken = hashValue(refreshToken);
+  log("REFRESH_ATTEMPT", { requestId, tokenPrefix: hashedToken.substring(0, 16) });
+
+  const session = await findRefreshSession(hashedToken);
+  if (!session) {
+    log("REFRESH_FAILED", { requestId, reason: "session_not_found_or_expired" });
+    throw new AppError("AUTH_EXPIRED", "Refresh token is invalid or expired", 401);
+  }
+
+  log("REFRESH_FOUND", { requestId, userId: session.userId.toString(), rotated: Boolean(session.previousRefreshTokenHash) });
 
   const accessToken = randomToken();
   const nextRefreshToken = randomToken();
@@ -201,6 +215,8 @@ export const refreshSession = async (refreshToken, requestId) => {
     expiresAt: new Date(now.getTime() + env.accessTokenTtlMs),
     refreshExpiresAt: new Date(now.getTime() + env.refreshTokenTtlMs),
   });
+  log("REFRESH_ROTATED", { requestId, userId: session.userId.toString() });
+
   return {
     accessToken,
     refreshToken: nextRefreshToken,
@@ -220,4 +236,5 @@ export const logout = async (accessToken, requestId, userId) => {
     entityId: userId,
     requestId,
   });
+  log("LOGOUT_SUCCESS", { requestId, userId });
 };
