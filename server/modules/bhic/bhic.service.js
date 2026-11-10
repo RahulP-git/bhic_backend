@@ -152,7 +152,7 @@ const buildCycles = (groupId, input, count, startNumber = 1) => {
 export const createBhicGroup = async (body, userId, requestId) => {
   const input = validateGroupInput(body);
   const createdAt = now();
-  const group = { ...input, managerId: userId, status: "ACTIVE", currentCycleNumber: 0, activeRuleVersion: 1, createdAt, updatedAt: createdAt };
+  const group = { ...input, managerId: userId, status: "ACTIVE", currentCycleNumber: 1, activeRuleVersion: 1, createdAt, updatedAt: createdAt };
   const result = await createGroup(group);
   const groupId = result.insertedId;
   await getDatabase().collection("group_rule_versions").insertOne({ groupId, version: 1, ...input.rules, effectiveFrom: createdAt, createdBy: userId, createdAt });
