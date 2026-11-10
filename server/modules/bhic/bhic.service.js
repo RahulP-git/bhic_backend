@@ -13,14 +13,74 @@ import { correctWinner, createWinner, findWinner, hasMemberWon } from "../../mod
 import { createSettlement, findSettlement } from "../../models/settlements.model.js";
 import { createDistribution, createDistributionItems, findDistribution, listDistributionItems, updateDistribution } from "../../models/distributions.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
+import { findUserById } from "../../models/users.model.js";
 
 const now = () => new Date();
 const page = (value, fallback, max) => Math.min(Math.max(Number(value) || fallback, 1), max);
 const toPublic = (value) => serialize(value);
 
+// A manager is a real member of every group they own. This also repairs groups
+// created before manager membership was introduced, so all member-consuming
+// endpoints see the same first member without requiring a manual migration.
+const ensureManagerMember = async (group, userId) => {
+  const members = getDatabase().collection("group_members");
+  const existing = await members.findOne({ groupId: group._id, managerUserId: userId });
+  if (existing) {
+    await members.updateMany(
+      { groupId: group._id, memberOrder: { $exists: false }, isManager: { $ne: true } },
+      { $set: { isManager: false, memberOrder: 1, updatedAt: now() } },
+    );
+    return existing;
+  }
+
+  const user = await findUserById(userId);
+  if (!user?.mobileNumber) return null;
+  const normalizedPrimaryContact = normalizeMobileNumber(user.mobileNumber);
+  const nowValue = now();
+  const contactMatch = await members.findOne({ groupId: group._id, normalizedPrimaryContact });
+  if (contactMatch) {
+    const updated = await members.findOneAndUpdate(
+      { _id: contactMatch._id },
+      { $set: { managerUserId: userId, isManager: true, memberOrder: 0, updatedAt: nowValue } },
+      { returnDocument: "after" },
+    );
+    await members.updateMany(
+      { groupId: group._id, memberOrder: { $exists: false }, isManager: { $ne: true } },
+      { $set: { isManager: false, memberOrder: 1, updatedAt: now() } },
+    );
+    return updated.value || updated;
+  }
+
+  const member = {
+    groupId: group._id,
+    managerUserId: userId,
+    isManager: true,
+    memberOrder: 0,
+    fullName: user.managerName || "Group Manager",
+    primaryContactNumber: user.mobileNumber,
+    normalizedPrimaryContact,
+    optionalContactNumber: undefined,
+    address: "Group Manager",
+    description: "Logged-in group manager",
+    membershipStatus: "ACTIVE",
+    allocationStatus: "NOT_ALLOCATED",
+    wonCycleIds: [],
+    joinedAt: nowValue,
+    createdAt: nowValue,
+    updatedAt: nowValue,
+  };
+  const result = await members.insertOne(member);
+  await members.updateMany(
+    { groupId: group._id, memberOrder: { $exists: false }, isManager: { $ne: true } },
+    { $set: { isManager: false, memberOrder: 1, updatedAt: now() } },
+  );
+  return { ...member, _id: result.insertedId };
+};
+
 const ensureGroup = async (groupId, managerId) => {
   const group = await findGroup(toObjectId(groupId, "groupId"), managerId);
   if (!group) throw new AppError("NOT_FOUND", "Group not found", 404);
+  await ensureManagerMember(group, managerId);
   return group;
 };
 
@@ -56,15 +116,16 @@ const validateGroupInput = (body) => {
   const frequency = body.frequency || "MONTHLY";
   if (frequency !== "MONTHLY") throw new AppError("VALIDATION_ERROR", "Only MONTHLY frequency is supported", 400);
   const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
-  const totalBhicAmount = moneyToRupees(body.totalBhicAmount, "totalBhicAmount");
+  // The total BHIC amount is derived from the configured member count. The
+  // client may display/send totalBhicAmount, but the server remains authoritative.
   const controlledAmount = moneyToRupees(body.controlledAmount, "controlledAmount");
   const memberLimit = Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
     throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
   }
+  const totalBhicAmount = contributionAmount * memberLimit;
   if (contributionAmount <= 0 || totalBhicAmount <= 0) throw new AppError("VALIDATION_ERROR", "Financial amounts must be greater than zero", 400);
   if (controlledAmount > totalBhicAmount) throw new AppError("RULE_CONTRADICTION", "controlledAmount cannot exceed totalBhicAmount", 400);
-  if (totalBhicAmount < contributionAmount * memberLimit) throw new AppError("RULE_CONTRADICTION", "totalBhicAmount is less than the expected contributions", 400);
   const rules = body.rules && typeof body.rules === "object" && !Array.isArray(body.rules) ? body.rules : {};
   return { name, description: optionalString(body.description, "description", { max: 1000 }), startDate, startTime, timezone, frequency, contributionAmount, totalBhicAmount, controlledAmount, memberLimit, rules };
 };
@@ -95,6 +156,7 @@ export const createBhicGroup = async (body, userId, requestId) => {
   const result = await createGroup(group);
   const groupId = result.insertedId;
   await getDatabase().collection("group_rule_versions").insertOne({ groupId, version: 1, ...input.rules, effectiveFrom: createdAt, createdBy: userId, createdAt });
+  await ensureManagerMember({ ...group, _id: groupId }, userId);
   await createCycles(buildCycles(groupId, input, input.memberLimit));
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "GROUP_CREATED", entityType: "GROUP", entityId: groupId, requestId });
   return toPublic({ ...group, _id: groupId });
@@ -147,7 +209,7 @@ export const addGroupMember = async (groupId, body, user, requestId) => {
   if (activeCount >= group.memberLimit) throw new AppError("CONFLICT", "Group member limit has been reached", 409);
   const duplicate = await getDatabase().collection("group_members").findOne({ groupId: group._id, normalizedPrimaryContact: primaryContactNumber, membershipStatus: { $ne: "REMOVED" } });
   if (duplicate) throw new AppError("DUPLICATE_MEMBER", "Member already exists in this group", 409);
-  const member = { groupId: group._id, fullName, primaryContactNumber, normalizedPrimaryContact: primaryContactNumber, optionalContactNumber, address, description, membershipStatus: "ACTIVE", allocationStatus: "NOT_ALLOCATED", wonCycleIds: [], joinedAt: now(), createdAt: now(), updatedAt: now() };
+  const member = { groupId: group._id, isManager: false, memberOrder: activeCount + 1, fullName, primaryContactNumber, normalizedPrimaryContact: primaryContactNumber, optionalContactNumber, address, description, membershipStatus: "ACTIVE", allocationStatus: "NOT_ALLOCATED", wonCycleIds: [], joinedAt: now(), createdAt: now(), updatedAt: now() };
   const result = await createMember(member);
   const memberId = result.insertedId;
   const message = await queueMemberInformation(group, { ...member, _id: memberId }, user);
@@ -231,6 +293,9 @@ export const startBhicCycle = async (cycleId, userId, requestId) => {
   const group = await ensureGroup(cycle.groupId, userId);
   const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
   if (!members.length) throw new AppError("INVALID_STATE", "At least one active member is required", 409);
+  if (members.length !== group.memberLimit) {
+    throw new AppError("INVALID_STATE", `Add all ${group.memberLimit - members.length} remaining member(s) before starting BHIC`, 409);
+  }
   const participants = members.map((member) => ({ cycleId: cycle._id, memberId: member._id, expectedContribution: group.contributionAmount, collectedAmount: 0, outstandingAmount: group.contributionAmount, collectionStatus: "UNPAID", eligibleForWinner: true, previousWinnerFlag: Boolean(member.wonCycleIds?.length), distributionStatus: "PENDING", createdAt: now(), updatedAt: now() }));
   await createParticipants(participants);
   const updated = await updateCycle(cycle._id, { status: "COLLECTING_CONTRIBUTIONS", actualStart: now(), expectedTotal: group.contributionAmount * members.length, totalOutstanding: group.contributionAmount * members.length });
@@ -444,9 +509,29 @@ export const completeBhicCycle = async (cycleId, userId, requestId) => {
 
 export const getGroupDashboard = async (groupId, userId) => {
   const group = await ensureGroup(groupId, userId);
-  const [memberCount, cycles, notifications] = await Promise.all([countActiveMembers(group._id), listCycles(group._id), listNotifications(userId, 0, 5)]);
+  const [memberCount, members, cycles, notifications] = await Promise.all([
+    countActiveMembers(group._id),
+    listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit),
+    listCycles(group._id),
+    listNotifications(userId, 0, 5),
+  ]);
   const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1];
-  return toPublic({ group, totalMembers: memberCount, currentBhicNumber: currentCycle?.bhicNumber || 0, currentCycle, recentNotifications: notifications });
+  const loggedInMember = members.find((member) => member.isManager) || members[0] || null;
+  const managerFirstName = loggedInMember?.fullName?.trim().split(/\s+/)[0] || null;
+  return toPublic({
+    group,
+    managerName: loggedInMember?.fullName || null,
+    managerFirstName,
+    loggedInMember,
+    totalMembers: memberCount,
+    memberCount,
+    members,
+    startedDate: group.startDate,
+    nextDate: currentCycle?.scheduledStart || null,
+    currentBhicNumber: currentCycle?.bhicNumber || 0,
+    currentCycle,
+    recentNotifications: notifications,
+  });
 };
 
 export const getManagerNotifications = async (userId, query) => {

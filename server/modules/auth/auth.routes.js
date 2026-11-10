@@ -2,7 +2,7 @@ import { Router } from "express";
 import { asyncHandler, successResponse } from "../../common/http.js";
 import { AppError } from "../../common/errors.js";
 import { requireAuth } from "../../middleware/auth.js";
-import { logout, refreshSession, requestOtp, verifyOtp } from "./auth.service.js";
+import { logout, refreshSession, requestEmailOtp, requestOtp, verifyEmailOtp, verifyOtp } from "./auth.service.js";
 
 export const authRouter = Router();
 
@@ -21,6 +21,16 @@ authRouter.post("/refresh", asyncHandler(async (req, res) => {
     throw new AppError("VALIDATION_ERROR", "refreshToken is required", 400);
   }
   const data = await refreshSession(req.body.refreshToken, req.requestId);
+  successResponse(res, data);
+}));
+
+authRouter.post("/email/request-otp", requireAuth, asyncHandler(async (req, res) => {
+  const data = await requestEmailOtp({ userId: req.auth.user._id, email: req.body?.email, requestId: req.requestId });
+  successResponse(res, data, 201);
+}));
+
+authRouter.post("/email/verify-otp", requireAuth, asyncHandler(async (req, res) => {
+  const data = await verifyEmailOtp({ userId: req.auth.user._id, challengeId: req.body?.challengeId, otp: req.body?.otp });
   successResponse(res, data);
 }));
 

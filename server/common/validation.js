@@ -24,6 +24,14 @@ export const normalizeMobileNumber = (value) => {
   return mobileNumber;
 };
 
+export const normalizeEmail = (value) => {
+  const email = requireString(value, "email", { min: 5, max: 255 }).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw validationError("email must be a valid email address", { field: "email" });
+  }
+  return email;
+};
+
 export const optionalString = (value, field, options) => {
   if (value === undefined || value === null) return undefined;
   return requireString(value, field, options);
@@ -31,8 +39,11 @@ export const optionalString = (value, field, options) => {
 
 export const validateProfileUpdate = (body) => {
   const updates = {};
-  if (body.managerName !== undefined) {
-    updates.managerName = requireString(body.managerName, "managerName", { min: 2, max: 100 });
+  if (body.managerName !== undefined || body.fullName !== undefined) {
+    updates.managerName = requireString(body.managerName ?? body.fullName, "fullName", { min: 2, max: 100 });
+  }
+  if (body.address !== undefined) {
+    updates.address = requireString(body.address, "address", { min: 5, max: 1000 });
   }
   if (body.preferences !== undefined) {
     if (!body.preferences || typeof body.preferences !== "object" || Array.isArray(body.preferences)) {

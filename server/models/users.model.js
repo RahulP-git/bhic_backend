@@ -3,6 +3,7 @@ import { getDatabase } from "../db/mongo.js";
 const collection = () => getDatabase().collection("users");
 
 export const findUserByMobile = (mobileNumber) => collection().findOne({ mobileNumber });
+export const findUserByEmail = (email) => collection().findOne({ email });
 export const findUserById = (userId) => collection().findOne({ _id: userId });
 
 export const createUser = async ({ managerName, mobileNumber }) => {
@@ -40,4 +41,7 @@ export const updateUserProfile = async (userId, updates) => {
 };
 
 export const ensureUserIndexes = () =>
-  collection().createIndex({ mobileNumber: 1 }, { unique: true });
+  Promise.all([
+    collection().createIndex({ mobileNumber: 1 }, { unique: true }),
+    collection().createIndex({ email: 1 }, { unique: true, sparse: true }),
+  ]);

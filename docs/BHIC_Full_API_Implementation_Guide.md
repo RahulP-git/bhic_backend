@@ -119,6 +119,8 @@ Use these rules in Flutter:
 | GET | `/app/bootstrap` | Public |
 | POST | `/auth/login/request-otp` | Public |
 | POST | `/auth/login/verify-otp` | Public |
+| POST | `/auth/email/request-otp` | Access token |
+| POST | `/auth/email/verify-otp` | Access token |
 | POST | `/auth/refresh` | Refresh token |
 | POST | `/auth/logout` | Access token |
 | GET | `/users/me` | Access token |
@@ -194,6 +196,7 @@ Request:
 ```json
 {
   "managerName": "Rahul Kumar",
+  "fullName": "Rahul Kumar",
   "mobileNumber": "+919876543210",
   "deviceId": "android-device-id"
 }
@@ -202,6 +205,7 @@ Request:
 Validation:
 
 - `managerName`: required string, 2–100 characters.
+- `fullName`: accepted as an alias for `managerName`.
 - `mobileNumber`: required international number, such as `+919876543210`.
 - `deviceId`: optional string, maximum 255 characters.
 
@@ -260,12 +264,49 @@ Response data:
   "user": {
     "id": "user-id",
     "managerName": "Rahul Kumar",
+    "fullName": "Rahul Kumar",
     "mobileNumber": "+919876543210",
+    "email": null,
+    "emailVerifiedAt": null,
+    "address": null,
     "role": "MANAGER",
-    "status": "ACTIVE"
+    "status": "ACTIVE",
+    "onboardingCompleted": false,
+    "nextStep": "EMAIL"
   }
 }
 ```
+
+After mobile OTP verification, the backend returns a session so the authenticated email and address onboarding steps can continue. `nextStep` is one of `EMAIL`, `EMAIL_OTP`, `ADDRESS`, or `HOME`.
+
+### POST `/auth/email/request-otp`
+
+Requires the access token returned by mobile OTP verification.
+
+Request:
+
+```json
+{
+  "email": "rahul@example.com"
+}
+```
+
+Creates a short-lived email OTP challenge. In debug mode the response also contains `debugOtp`.
+
+### POST `/auth/email/verify-otp`
+
+Requires the access token and email challenge ID.
+
+Request:
+
+```json
+{
+  "challengeId": "email-challenge-id",
+  "otp": "123456"
+}
+```
+
+On success, the email is saved with `emailVerifiedAt` and the updated onboarding state is returned.
 
 ### POST `/auth/refresh`
 
@@ -277,7 +318,7 @@ Request:
 }
 ```
 
-The backend rotates both tokens. Replace the stored token pair together.
+The backend rotates both tokens and returns the current user onboarding state. Replace the stored token pair together.
 
 ### POST `/auth/logout`
 
@@ -293,7 +334,7 @@ Response data:
 
 ### GET `/users/me`
 
-Returns the authenticated Manager profile.
+Returns the authenticated Manager profile, including full name, verified email, address, and onboarding state. The Flutter splash screen should use `onboardingCompleted` and `nextStep` to resume onboarding or navigate directly to Home.
 
 ### PATCH `/users/me`
 
@@ -302,6 +343,8 @@ Request example:
 ```json
 {
   "managerName": "Rahul Kumar",
+  "fullName": "Rahul Kumar",
+  "address": "Pune, Maharashtra",
   "preferences": {
     "language": "en",
     "notificationsEnabled": true
@@ -312,6 +355,8 @@ Request example:
 Validation:
 
 - `managerName`: optional, 2–100 characters.
+- `fullName`: accepted as an alias for `managerName`.
+- `address`: optional, 5–1000 characters.
 - `preferences`: optional JSON object.
 - At least one field is required.
 - Mobile-number changes require a separate verification flow and are not accepted here.
@@ -389,7 +434,6 @@ Request:
   "timezone": "Asia/Kolkata",
   "frequency": "MONTHLY",
   "contributionAmount": 1000,
-  "totalBhicAmount": 10000,
   "controlledAmount": 5000,
   "memberLimit": 10,
   "rules": {
@@ -407,9 +451,9 @@ Validation:
 - `timezone`: required IANA timezone string.
 - `frequency`: currently `MONTHLY` only.
 - Amounts: non-negative, maximum two decimal places.
-- `contributionAmount` and `totalBhicAmount` must be greater than zero.
+- `contributionAmount` must be greater than zero.
+- `totalBhicAmount` is calculated by the backend as `contributionAmount × memberLimit`; any client-sent value is not authoritative.
 - `controlledAmount` cannot exceed `totalBhicAmount`.
-- `totalBhicAmount` must be at least `contributionAmount × memberLimit`.
 - `memberLimit`: integer from 1 to 1000.
 - `rules`: optional JSON object.
 
@@ -418,7 +462,8 @@ Behavior:
 1. Creates the group for the authenticated Manager.
 2. Creates rule version 1.
 3. Generates one scheduled cycle for each member-limit position.
-4. Writes an audit record.
+4. Creates the authenticated Manager as the first active group member.
+5. Writes an audit record.
 
 ### GET `/groups`
 
@@ -457,7 +502,7 @@ Closed groups cannot be updated. Rule changes create a new rule version.
 
 ### GET `/groups/{groupId}/dashboard`
 
-Returns group details, active member count, current cycle, and recent Manager notifications.
+Returns group details, active member count, current cycle, recent Manager notifications, and the active member list with the logged-in Manager first. It also includes `managerFirstName`, `loggedInMember`, `memberCount`, `startedDate`, and `nextDate` for the Home screen.
 
 ### POST `/groups/{groupId}/close`
 
@@ -496,6 +541,8 @@ Validation:
 - `description`: maximum 1000 characters.
 - Active member count cannot exceed the group member limit.
 - Duplicate active primary contacts are rejected.
+
+The authenticated Manager is already member 1 and is not added through this endpoint. Member ordering always places the Manager first, followed by added members.
 
 The endpoint also creates a `GROUP_INFORMATION` WhatsApp queue record.
 
@@ -561,8 +608,10 @@ Starts a cycle only when:
 
 - The cycle is `SCHEDULED`.
 - Server time has reached `scheduledStart`.
-- The group has active members.
+- The group has exactly `memberLimit` active members, including the authenticated Manager as member 1.
 - The authenticated Manager owns the group.
+
+If the group is not full, the endpoint returns `INVALID_STATE` and the number of remaining members that must be added.
 
 Repeated calls after a cycle has started return the current cycle instead of creating participants again.
 
@@ -853,19 +902,18 @@ Invalid transitions return:
 Implement the Flutter screens in this order:
 
 1. Splash: call `/app/bootstrap`.
-2. Login: call `/auth/login/request-otp`.
-3. OTP screen: call `/auth/login/verify-otp`.
-4. Securely store both tokens.
-5. Load Manager profile with `/users/me`.
-6. Create and list groups.
-7. Add and list members.
-8. Display scheduled cycles.
-9. Record cash collections.
-10. Load eligible winners.
-11. Save winner and settlement.
-12. Create, validate, and publish distribution.
-13. Complete the cycle.
-14. Display notifications and message queue status.
+2. Check locally stored access and refresh tokens.
+3. If a stored session is valid, call `/users/me`; navigate to Home when `onboardingCompleted` is true, otherwise resume `nextStep`.
+4. First-time flow: collect full name and mobile number, then call `/auth/login/request-otp`.
+5. Verify mobile OTP with `/auth/login/verify-otp` and securely store both tokens.
+6. Collect email and call `/auth/email/request-otp`.
+7. Verify email with `/auth/email/verify-otp`.
+8. Collect address and call `PATCH /users/me`.
+9. Navigate to Home after `onboardingCompleted` becomes true.
+10. Load the Home dashboard from `/groups/{groupId}/dashboard`; it includes group details and the ordered member list.
+11. Create and list groups, add remaining members, and display scheduled cycles.
+12. Record cash collections, select the winner, settle, publish distribution, and complete the cycle.
+13. Display notifications and message queue status.
 
 ## 20. Local test sequence
 
