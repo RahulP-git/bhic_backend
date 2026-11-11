@@ -390,10 +390,17 @@ const calculateDistribution = (members, sourceAmount, interestRate) => {
   const baseAmount = Math.floor(sourceAmount / members.length);
   const remainder = sourceAmount - baseAmount * members.length;
   return members.map((member, index) => {
-    const base = baseAmount + (index === 0 ? remainder : 0);
+    const base = baseAmount + (index === members.length - 1 ? remainder : 0);
     const interestAmount = roundRupees((base * interestRate) / 100);
     return { memberId: member._id, baseAmount: base, interestRate, interestAmount, finalAmount: base + interestAmount, status: "DRAFT" };
   });
+};
+
+const formatDateTimeInTimezone = (date, timezone) => {
+  const d = new Date(date);
+  const dateStr = d.toLocaleDateString("en-CA", { timeZone: timezone });
+  const timeStr = d.toLocaleTimeString("en-GB", { timeZone: timezone, hour12: false, hour: "2-digit", minute: "2-digit" });
+  return { distributionDate: dateStr, distributionTime: timeStr };
 };
 
 const distributionMembers = async (cycle) => {
@@ -414,7 +421,7 @@ export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const cycle = await ensureCycle(cycleId, userId);
   if (cycle.status !== "DISTRIBUTION_PENDING") throw new AppError("INVALID_STATE", "Cycle must be in DISTRIBUTION_PENDING before creating distribution draft", 409);
   const existing = await findDistribution(cycle._id);
-  if (existing) return toPublic({ distribution: existing, items: await listDistributionItems(existing._id) });
+  if (existing) return toPublic(buildDistributionResponse(cycle, existing, await listDistributionItems(existing._id)));
   const group = await findGroupById(cycle.groupId);
   const members = await distributionMembers(cycle);
   const rate = Number(group.rules?.defaultInterestRate || 0);
@@ -425,34 +432,50 @@ export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const result = await createDistribution(distribution);
   await createDistributionItems(itemInputs.map((item) => ({ ...item, distributionId: result.insertedId, cycleId: cycle._id, createdAt: now(), updatedAt: now() })));
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "DISTRIBUTION_DRAFT_CREATED", entityType: "DISTRIBUTION", entityId: result.insertedId, requestId });
-  return toPublic({ distribution: { ...distribution, _id: result.insertedId }, items: await listDistributionItems(result.insertedId) });
+  return toPublic(buildDistributionResponse(cycle, { ...distribution, _id: result.insertedId }, await listDistributionItems(result.insertedId)));
 };
 
 export const getDistribution = async (cycleId, userId) => {
   const cycle = await ensureCycle(cycleId, userId);
   const distribution = await findDistribution(cycle._id);
   if (!distribution) throw new AppError("NOT_FOUND", "Distribution draft not found", 404);
+  return toPublic(await buildDistributionResponse(cycle, distribution, await listDistributionItems(distribution._id)));
+};
+
+const buildDistributionResponse = async (cycle, distribution, items) => {
   const winner = await findWinner(cycle._id);
-  const items = await listDistributionItems(distribution._id);
+  const winnerMemberId = winner ? winner.memberId : null;
+  const dateTime = formatDateTimeInTimezone(distribution.createdAt, cycle.timezone || "Asia/Kolkata");
   const transformedItems = [];
   for (const item of items) {
     const member = await findMember(item.memberId, cycle.groupId);
+    const amount = item.totalAmount || item.finalAmount || 0;
     transformedItems.push({
       memberId: item.memberId,
       memberName: member ? member.fullName : null,
-      amount: item.finalAmount,
+      amount,
+      rate: item.interestRate || 0,
+      totalAmount: amount,
+      status: item.status || "PENDING",
       isWinner: winner && item.memberId.toString() === winner.memberId.toString(),
     });
   }
-  return toPublic({
+  const totalDistributedAmount = transformedItems.reduce((sum, item) => sum + item.amount, 0);
+  return {
     cycleId: cycle._id,
     cycleNumber: cycle.bhicNumber,
-    winnerMemberId: winner ? winner.memberId : null,
+    groupId: cycle.groupId,
+    status: distribution.status,
+    winnerMemberId,
     winnerBidAmount: cycle.winnerBidAmount,
     winnerPayoutAmount: cycle.winnerPayoutAmount,
     sourceAmount: distribution.sourceAmount,
+    distributionDate: dateTime.distributionDate,
+    distributionTime: dateTime.distributionTime,
+    timezone: cycle.timezone || "Asia/Kolkata",
     items: transformedItems,
-  });
+    totalDistributedAmount,
+  };
 };
 
 export const updateDistributionInputs = async (cycleId, body, userId, requestId) => {
@@ -470,14 +493,19 @@ export const updateDistributionInputs = async (cycleId, body, userId, requestId)
   await createDistributionItems(itemInputs.map((item) => ({ ...item, distributionId: distribution._id, cycleId: cycle._id, createdAt: now(), updatedAt: now() })));
   const updated = await updateDistribution(cycle._id, { sourceAmount, interestRate, totalCalculatedAmount: itemInputs.reduce((sum, item) => sum + item.finalAmount, 0), roundingAdjustment: 0 });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "DISTRIBUTION_UPDATED", entityType: "DISTRIBUTION", entityId: distribution._id, requestId });
-  return toPublic({ distribution: updated.value || updated, items: await listDistributionItems(distribution._id) });
+  return toPublic(await buildDistributionResponse(cycle, updated.value || updated, await listDistributionItems(distribution._id)));
 };
 
 export const validateDistribution = async (cycleId, userId) => {
   const result = await getDistribution(cycleId, userId);
+  const cycle = await ensureCycle(cycleId, userId);
   const total = result.items.reduce((sum, item) => sum + item.amount, 0);
-  const valid = result.items.length > 0 && result.sourceAmount >= 0 && total >= 0;
-  return { valid, totalCalculatedAmount: roundRupees(total), sourceAmount: roundRupees(result.sourceAmount), errors: valid ? [] : ["Distribution has no valid items"] };
+  const errors = [];
+  if (result.items.length === 0) errors.push("Distribution has no valid items");
+  if (result.sourceAmount !== cycle.winnerBidAmount) errors.push("Source amount must equal winnerBidAmount");
+  if (total !== cycle.winnerBidAmount) errors.push("Total distributed amount must equal winnerBidAmount");
+  const valid = errors.length === 0;
+  return { valid, totalCalculatedAmount: roundRupees(total), sourceAmount: roundRupees(result.sourceAmount), errors };
 };
 
 export const publishDistribution = async (cycleId, userId, requestId) => {
@@ -485,15 +513,14 @@ export const publishDistribution = async (cycleId, userId, requestId) => {
   if (cycle.status !== "DISTRIBUTION_PENDING") throw new AppError("INVALID_STATE", "Cycle must be in DISTRIBUTION_PENDING to publish distribution", 409);
   const distribution = await findDistribution(cycle._id);
   if (!distribution) throw new AppError("NOT_FOUND", "Distribution draft not found", 404);
-  if (distribution.status === "PUBLISHED") return toPublic({ distribution, items: await listDistributionItems(distribution._id) });
+  if (distribution.status === "PUBLISHED") return toPublic(await buildDistributionResponse(cycle, distribution, await listDistributionItems(distribution._id)));
   const validation = await validateDistribution(cycleId, userId);
   if (!validation.valid) throw new AppError("INVALID_STATE", "Distribution validation failed", 409, validation.errors);
-  if (validation.totalCalculatedAmount !== cycle.winnerBidAmount) throw new AppError("AMOUNT_MISMATCH", "Distribution total must equal winnerBidAmount", 409);
   const updated = await updateDistribution(cycle._id, { status: "PUBLISHED", publishedBy: userId, publishedAt: now() });
   await updateCycle(cycle._id, { status: "DISTRIBUTION_PUBLISHED" });
   await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "DISTRIBUTION_PUBLISHED", title: "Distribution published", body: `Distribution for BHIC ${cycle.bhicNumber} was published`, createdAt: now() });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "DISTRIBUTION_PUBLISHED", entityType: "DISTRIBUTION", entityId: distribution._id, requestId });
-  return toPublic({ distribution: updated.value || updated, items: await listDistributionItems(distribution._id) });
+  return toPublic(await buildDistributionResponse(cycle, updated.value || updated, await listDistributionItems(distribution._id)));
 };
 
 export const completeBhicCycle = async (cycleId, userId, requestId) => {
