@@ -348,7 +348,10 @@ export const correctCashCollection = async (cycleId, collectionId, reason, userI
 export const eligibleWinners = async (cycleId, userId) => {
   const cycle = await ensureCycle(cycleId, userId);
   const participants = await listParticipants(cycle._id);
-  const members = await Promise.all(participants.filter((item) => item.eligibleForWinner && !item.previousWinnerFlag).map((item) => findMember(item.memberId, cycle.groupId)));
+  const eligibleParticipants = participants.filter(
+    (item) => item.eligibleForWinner && !item.previousWinnerFlag && item.collectionStatus === "PAID"
+  );
+  const members = await Promise.all(eligibleParticipants.map((item) => findMember(item.memberId, cycle.groupId)));
   const eligible = [];
   for (const member of members) if (member && !(await hasMemberWon(cycle.groupId, member._id))) eligible.push(member);
   return toPublic(eligible);
@@ -361,12 +364,13 @@ export const saveWinner = async (cycleId, body, userId, requestId) => {
   const winnerMemberId = toObjectId(body.winnerMemberId, "winnerMemberId");
   const eligible = await eligibleWinners(cycleId, userId);
   if (!eligible.some((member) => member._id.toString() === winnerMemberId.toString())) throw new AppError("MEMBER_NOT_ELIGIBLE", "Selected member is not eligible", 400);
-  const winnerAmount = moneyToRupees(body.winnerAmount, "winnerAmount");
-  const receivedAmount = moneyToRupees(body.receivedAmount, "receivedAmount");
-  if (!winnerAmount || !receivedAmount || winnerAmount <= 0 || receivedAmount <= 0) throw new AppError("VALIDATION_ERROR", "winnerAmount and receivedAmount must be positive", 400);
-  const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerAmount, receivedAmount, remainingAmount: winnerAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
+  const winnerBidAmount = moneyToRupees(body.winnerBidAmount, "winnerBidAmount");
+  const winnerPayoutAmount = moneyToRupees(body.winnerPayoutAmount, "winnerPayoutAmount");
+  if (!winnerBidAmount || !winnerPayoutAmount || winnerBidAmount <= 0 || winnerPayoutAmount <= 0) throw new AppError("VALIDATION_ERROR", "winnerBidAmount and winnerPayoutAmount must be positive", 400);
+  if (winnerBidAmount + winnerPayoutAmount !== cycle.expectedTotal) throw new AppError("VALIDATION_ERROR", "winnerBidAmount plus winnerPayoutAmount must equal the cycle expected total", 400);
+  const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
   const result = await createWinner(winner);
-  await updateCycle(cycle._id, { winnerId: result.insertedId, winnerAmount, receivedAmount, remainingAmount: winner.remainingAmount, status: "SETTLEMENT_PENDING" });
+  await updateCycle(cycle._id, { winnerId: result.insertedId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, status: "SETTLEMENT_PENDING" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_SELECTED", entityType: "WINNER", entityId: result.insertedId, requestId });
   return toPublic({ ...winner, _id: result.insertedId });
 };
@@ -377,7 +381,7 @@ export const correctSelectedWinner = async (cycleId, reason, userId, requestId) 
   const winner = await findWinner(cycle._id);
   if (!winner) throw new AppError("NOT_FOUND", "Winner not found", 404);
   const updated = await correctWinner(cycle._id, { correctedBy: userId, correctionReason: reason.trim() });
-  await updateCycle(cycle._id, { winnerId: null, winnerAmount: null, receivedAmount: null, remainingAmount: null, status: "READY_FOR_WINNER_SELECTION" });
+  await updateCycle(cycle._id, { winnerId: null, winnerBidAmount: null, winnerPayoutAmount: null, remainingAmount: null, status: "READY_FOR_WINNER_SELECTION" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_CORRECTED", entityType: "WINNER", entityId: winner._id, requestId, reason });
   return toPublic(updated.value || updated);
 };
@@ -389,7 +393,7 @@ export const saveSettlement = async (cycleId, body, userId, requestId) => {
   if (await findSettlement(cycle._id)) throw new AppError("CONFLICT", "Settlement already recorded", 409);
   const actualAmount = moneyToRupees(body.actualAmount, "actualAmount");
   const expectedAmount = moneyToRupees(body.expectedAmount, "expectedAmount");
-  if (expectedAmount !== winner.remainingAmount && expectedAmount !== winner.receivedAmount) throw new AppError("AMOUNT_MISMATCH", "expectedAmount does not match the winner record", 400);
+  if (expectedAmount !== winner.winnerPayoutAmount) throw new AppError("AMOUNT_MISMATCH", "expectedAmount must match the winner payout amount", 400);
   if (actualAmount !== expectedAmount) throw new AppError("AMOUNT_MISMATCH", "actualAmount must match expectedAmount", 400);
   const method = body.method || "CASH";
   if (!["CASH", "OFFLINE"].includes(method)) throw new AppError("VALIDATION_ERROR", "method must be CASH or OFFLINE", 400);
@@ -434,7 +438,7 @@ export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const members = await distributionMembers(cycle);
   const rate = Number(group.rules?.defaultInterestRate || 0);
   if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new AppError("VALIDATION_ERROR", "Interest rate must be between 0 and 100", 400);
-  const sourceAmount = Math.max(0, group.controlledAmount || cycle.remainingAmount || 0);
+  const sourceAmount = cycle.winnerBidAmount || 0;
   const itemInputs = calculateDistribution(members, sourceAmount, rate);
   const distribution = { cycleId: cycle._id, groupId: cycle.groupId, sourceAmount, status: "DRAFT", ruleVersionId: group.activeRuleVersion, totalCalculatedAmount: itemInputs.reduce((sum, item) => sum + item.finalAmount, 0), roundingAdjustment: 0, interestRate: rate, createdBy: userId, createdAt: now(), updatedAt: now() };
   const result = await createDistribution(distribution);
@@ -529,7 +533,17 @@ export const getGroupDashboard = async (groupId, userId) => {
     startedDate: group.startDate,
     nextDate: currentCycle?.scheduledStart || null,
     currentBhicNumber: currentCycle?.bhicNumber || 0,
-    currentCycle,
+    currentCycle: currentCycle ? {
+      cycleId: currentCycle._id,
+      cycleNumber: currentCycle.bhicNumber,
+      groupId: currentCycle.groupId,
+      bhicNumber: currentCycle.bhicNumber,
+      status: currentCycle.status,
+      scheduledStart: currentCycle.scheduledStart,
+      totalCollected: currentCycle.totalCollected,
+      totalOutstanding: currentCycle.totalOutstanding,
+      winnerId: currentCycle.winnerId,
+    } : null,
     recentNotifications: notifications,
   });
 };
