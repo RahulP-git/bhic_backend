@@ -420,7 +420,8 @@ const buildDistributionResponse = async (cycle, distribution, items) => {
   const dateTime = formatDateTimeInTimezone(distribution.createdAt, cycle.timezone || "Asia/Kolkata");
   const transformedItems = [];
   for (const item of items) {
-    const member = await findMember(item.memberId, cycle.groupId);
+    const memberObjectId = toObjectId(item.memberId, "memberId");
+    const member = await findMember(memberObjectId, cycle.groupId);
     const amount = item.amount || item.finalAmount || 0;
     const interestAmount = item.interestAmount || 0;
     const totalAmount = item.totalAmount || amount + interestAmount;
@@ -480,11 +481,12 @@ export const updateDistributionInputs = async (cycleId, body, userId, requestId)
   const itemInputs = [];
   for (const item of items) {
     if (!item.memberId) throw new AppError("VALIDATION_ERROR", "memberId is required for each item", 400);
+    const memberObjectId = toObjectId(item.memberId, "memberId");
     const amount = moneyToRupees(item.amount, `items[${item.memberId}].amount`);
     if (amount < 0) throw new AppError("VALIDATION_ERROR", `Amount for member ${item.memberId} must be >= 0`, 400);
     if (winnerMemberId && item.memberId.toString() === winnerMemberId.toString()) throw new AppError("VALIDATION_ERROR", `Winner member ${item.memberId} cannot be in distribution items`, 409);
     if (!validMemberIds.has(item.memberId.toString())) throw new AppError("VALIDATION_ERROR", `Member ${item.memberId} is not a participant of this cycle`, 409);
-    const member = await findMember(item.memberId, cycle.groupId);
+    const member = await findMember(memberObjectId, cycle.groupId);
     if (!member || member.membershipStatus !== "ACTIVE") throw new AppError("VALIDATION_ERROR", `Member ${item.memberId} is not active`, 409);
     const interestAmount = roundRupees((amount * interestRate) / 100);
     const totalAmount = amount + interestAmount;
@@ -528,9 +530,10 @@ export const publishDistribution = async (cycleId, userId, requestId) => {
   const participants = await listParticipants(cycle._id);
   const validMemberIds = new Set(participants.map((p) => p.memberId.toString()));
   for (const item of items) {
+    const memberObjectId = toObjectId(item.memberId, "memberId");
     if (winnerMemberId && item.memberId.toString() === winnerMemberId.toString()) throw new AppError("VALIDATION_ERROR", "Winner is included in distribution items", 409);
     if (!validMemberIds.has(item.memberId.toString())) throw new AppError("VALIDATION_ERROR", `Member ${item.memberId} is not a participant of this cycle`, 409);
-    const member = await findMember(item.memberId, cycle.groupId);
+    const member = await findMember(memberObjectId, cycle.groupId);
     if (!member || member.membershipStatus !== "ACTIVE") throw new AppError("VALIDATION_ERROR", `Member ${item.memberId} is not active`, 409);
   }
   if (distribution.totalDistributedAmount > distribution.sourceAmount) throw new AppError("VALIDATION_ERROR", "Total distributed amount exceeds source amount", 409);
