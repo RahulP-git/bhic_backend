@@ -7,6 +7,7 @@ import {
   addGroupMember,
   closeBhicGroup,
   completeBhicCycle,
+  completionDecision,
   correctSelectedWinner,
   correctCashCollection,
   createBhicGroup,
@@ -77,6 +78,7 @@ bhicRouter.patch("/cycles/:cycleId/distribution", asyncHandler(async (req, res) 
 bhicRouter.post("/cycles/:cycleId/distribution/validate", asyncHandler(async (req, res) => successResponse(res, await validateDistribution(req.params.cycleId, req.auth.user._id))));
 bhicRouter.post("/cycles/:cycleId/distribution/publish", asyncHandler(async (req, res) => successResponse(res, await publishDistribution(req.params.cycleId, req.auth.user._id, req.requestId))));
 bhicRouter.post("/cycles/:cycleId/complete", asyncHandler(async (req, res) => successResponse(res, await completeBhicCycle(req.params.cycleId, req.auth.user._id, req.requestId))));
+bhicRouter.post("/cycles/:cycleId/completion-decision", asyncHandler(async (req, res) => successResponse(res, await completionDecision(req.params.cycleId, req.body, req.auth.user._id, req.requestId))));
 
 bhicRouter.get("/notifications", asyncHandler(async (req, res) => successResponse(res, await getManagerNotifications(req.auth.user._id, req.query))));
 bhicRouter.patch("/notifications/:notificationId/read", asyncHandler(async (req, res) => successResponse(res, await readNotification(req.params.notificationId, req.auth.user._id))));

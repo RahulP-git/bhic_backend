@@ -105,6 +105,12 @@ const addMonths = (date, months) => {
   return result;
 };
 
+const addDays = (date, days) => {
+  const result = new Date(date);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result;
+};
+
 const validateGroupInput = (body) => {
   const name = requireString(body.name, "name", { min: 2, max: 150 });
   const startDate = requireString(body.startDate, "startDate", { min: 10, max: 10 });
@@ -112,27 +118,29 @@ const validateGroupInput = (body) => {
   const startTime = requireString(body.startTime, "startTime", { min: 5, max: 5 });
   if (!/^\d{2}:\d{2}$/.test(startTime)) throw new AppError("VALIDATION_ERROR", "startTime must use HH:mm", 400);
   const timezone = requireString(body.timezone || "Asia/Kolkata", "timezone", { min: 3, max: 100 });
-  const frequency = body.frequency || "MONTHLY";
-  if (frequency !== "MONTHLY") throw new AppError("VALIDATION_ERROR", "Only MONTHLY frequency is supported", 400);
+  const cyclePeriod = body.cyclePeriod || "MONTHLY";
+  if (!["MONTHLY", "EVERY_15_DAYS"].includes(cyclePeriod)) throw new AppError("VALIDATION_ERROR", "cyclePeriod must be MONTHLY or EVERY_15_DAYS", 400);
+  const cycleIntervalDays = body.cycleIntervalDays === undefined || body.cycleIntervalDays === null ? null : Number(body.cycleIntervalDays);
+  if (cyclePeriod === "EVERY_15_DAYS" && (!Number.isInteger(cycleIntervalDays) || cycleIntervalDays < 1)) {
+    throw new AppError("VALIDATION_ERROR", "cycleIntervalDays must be a positive integer for EVERY_15_DAYS", 400);
+  }
   const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
-  // The total BHIC amount is derived from the configured member count. The
-  // client may display/send totalBhicAmount, but the server remains authoritative.
-  const controlledAmount = moneyToRupees(body.controlledAmount, "controlledAmount");
   const memberLimit = Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
     throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
   }
   const totalBhicAmount = contributionAmount * memberLimit;
   if (contributionAmount <= 0 || totalBhicAmount <= 0) throw new AppError("VALIDATION_ERROR", "Financial amounts must be greater than zero", 400);
-  if (controlledAmount > totalBhicAmount) throw new AppError("RULE_CONTRADICTION", "controlledAmount cannot exceed totalBhicAmount", 400);
   const rules = body.rules && typeof body.rules === "object" && !Array.isArray(body.rules) ? body.rules : {};
-  return { name, description: optionalString(body.description, "description", { max: 1000 }), startDate, startTime, timezone, frequency, contributionAmount, totalBhicAmount, controlledAmount, memberLimit, rules };
+  return { name, description: optionalString(body.description, "description", { max: 1000 }), startDate, startTime, timezone, cyclePeriod, cycleIntervalDays, contributionAmount, totalBhicAmount, memberLimit, rules };
 };
 
 const buildCycles = (groupId, input, count, startNumber = 1) => {
   const first = scheduledDate(input.startDate, input.startTime, input.timezone);
   return Array.from({ length: count }, (_, index) => {
-    const scheduledStart = addMonths(first, index + startNumber - 1);
+    const scheduledStart = input.cyclePeriod === "EVERY_15_DAYS"
+      ? addDays(first, input.cycleIntervalDays * index)
+      : addMonths(first, index + startNumber - 1);
     return {
       groupId,
       bhicNumber: startNumber + index,
@@ -288,7 +296,15 @@ export const generateGroupSchedule = async (groupId, userId, requestId) => {
 export const startBhicCycle = async (cycleId, userId, requestId) => {
   const cycle = await ensureCycle(cycleId, userId);
   if (cycle.status !== "SCHEDULED") return toPublic(cycle);
-  if (cycle.scheduledStart > now()) throw new AppError("INVALID_STATE", "Cycle cannot start before its scheduled time", 409);
+
+  // Allow immediate start when previous cycle was completed with START_NEXT_CYCLE
+  const previousCycle = await getDatabase().collection("cycles").findOne({
+    groupId: cycle.groupId,
+    bhicNumber: cycle.bhicNumber - 1,
+  });
+  const canStartImmediately = Boolean(previousCycle && previousCycle.status === "COMPLETED" && previousCycle.completionDecision === "START_NEXT_CYCLE");
+
+  if (!canStartImmediately && cycle.scheduledStart > now()) throw new AppError("INVALID_STATE", "Cycle cannot start before its scheduled time", 409);
   const group = await ensureGroup(cycle.groupId, userId);
   const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
   if (!members.length) throw new AppError("INVALID_STATE", "At least one active member is required", 409);
@@ -383,6 +399,114 @@ export const correctSelectedWinner = async (cycleId, reason, userId, requestId) 
   await updateCycle(cycle._id, { winnerId: null, winnerBidAmount: null, winnerPayoutAmount: null, remainingAmount: null, status: "READY_FOR_WINNER_SELECTION" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_CORRECTED", entityType: "WINNER", entityId: winner._id, requestId, reason });
   return toPublic(updated.value || updated);
+};
+
+export const completionDecision = async (cycleId, body, userId, requestId) => {
+  const cycle = await ensureCycle(cycleId, userId);
+  const winner = await findWinner(cycle._id);
+  if (!winner) throw new AppError("NOT_FOUND", "Winner not found for this cycle", 404);
+  const decision = requireString(body.decision, "decision", { min: 3, max: 50 });
+  if (!["DISTRIBUTE_REMAINING", "START_NEXT_CYCLE"].includes(decision)) {
+    throw new AppError("VALIDATION_ERROR", "decision must be DISTRIBUTE_REMAINING or START_NEXT_CYCLE", 400);
+  }
+
+  // Idempotency: return existing result if already decided and completed
+  if (cycle.status === "COMPLETED" && cycle.completionDecision === decision) {
+    const group = await ensureGroup(cycle.groupId, userId);
+    const existingCycles = await listCycles(group._id);
+    const nextCycle = existingCycles.find((c) => c.bhicNumber === cycle.bhicNumber + 1);
+    return toPublic({
+      cycleId: cycle._id,
+      cycleNumber: cycle.bhicNumber,
+      decision,
+      winnerBidAmount: winner.winnerBidAmount,
+      winnerPayoutAmount: winner.winnerPayoutAmount,
+      undistributedAmount: cycle.undistributedAmount || 0,
+      carryForwardAmount: cycle.carryForwardAmount || 0,
+      status: cycle.status,
+      nextCycle: nextCycle ? {
+        cycleId: nextCycle._id,
+        cycleNumber: nextCycle.bhicNumber,
+        scheduledStart: nextCycle.scheduledStart,
+        status: nextCycle.status,
+        canStartImmediately: true,
+      } : null,
+    });
+  }
+
+  if (decision === "DISTRIBUTE_REMAINING") {
+    await updateCycle(cycle._id, { completionDecision: "DISTRIBUTE_REMAINING", completionDecisionAt: now() });
+    await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "COMPLETION_DECISION", entityType: "CYCLE", entityId: cycle._id, requestId, afterSummary: { decision } });
+    return toPublic({
+      cycleId: cycle._id,
+      cycleNumber: cycle.bhicNumber,
+      decision: "DISTRIBUTE_REMAINING",
+      winnerBidAmount: winner.winnerBidAmount,
+      winnerPayoutAmount: winner.winnerPayoutAmount,
+      undistributedAmount: 0,
+      carryForwardAmount: 0,
+      status: cycle.status,
+      nextCycle: null,
+    });
+  }
+
+  // START_NEXT_CYCLE
+  await getDatabase().collection("group_members").updateOne(
+    { _id: winner.memberId },
+    { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
+  );
+  await updateCycle(cycle._id, {
+    status: "COMPLETED",
+    completedAt: now(),
+    completionDecision: "START_NEXT_CYCLE",
+    completionDecisionAt: now(),
+    undistributedAmount: winner.winnerBidAmount,
+    carryForwardAmount: 0,
+  });
+  await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `BHIC ${cycle.bhicNumber} has been completed`, createdAt: now() });
+  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
+
+  const group = await ensureGroup(cycle.groupId, userId);
+  const nextCycleNumber = cycle.bhicNumber + 1;
+  const existingCycles = await listCycles(group._id);
+  let nextCycle = existingCycles.find((c) => c.bhicNumber === nextCycleNumber);
+
+  if (!nextCycle) {
+    const result = await createCycles([{
+      groupId: group._id,
+      bhicNumber: nextCycleNumber,
+      scheduledStart: cycle.scheduledStart,
+      status: "SCHEDULED",
+      expectedTotal: group.contributionAmount * group.memberLimit,
+      totalCollected: 0,
+      totalOutstanding: group.contributionAmount * group.memberLimit,
+      activeRuleVersion: group.activeRuleVersion || 1,
+      createdAt: now(),
+      updatedAt: now(),
+    }]);
+    const insertedId = result.insertedIds ? result.insertedIds["0"] : result.insertedId;
+    nextCycle = await findCycle(insertedId);
+  }
+
+  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "NEXT_CYCLE_CREATED", entityType: "CYCLE", entityId: nextCycle._id, requestId, afterSummary: { cycleNumber: nextCycleNumber } });
+
+  return toPublic({
+    cycleId: cycle._id,
+    cycleNumber: cycle.bhicNumber,
+    decision: "START_NEXT_CYCLE",
+    winnerBidAmount: winner.winnerBidAmount,
+    winnerPayoutAmount: winner.winnerPayoutAmount,
+    undistributedAmount: winner.winnerBidAmount,
+    carryForwardAmount: 0,
+    status: "COMPLETED",
+    nextCycle: {
+      cycleId: nextCycle._id,
+      cycleNumber: nextCycle.bhicNumber,
+      scheduledStart: nextCycle.scheduledStart,
+      status: nextCycle.status,
+      canStartImmediately: true,
+    },
+  });
 };
 
 const formatDateTimeInTimezone = (date, timezone) => {
