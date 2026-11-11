@@ -364,7 +364,7 @@ export const saveWinner = async (cycleId, body, userId, requestId) => {
   const winnerAmount = moneyToRupees(body.winnerAmount, "winnerAmount");
   const receivedAmount = moneyToRupees(body.receivedAmount, "receivedAmount");
   if (!winnerAmount || !receivedAmount || winnerAmount <= 0 || receivedAmount <= 0) throw new AppError("VALIDATION_ERROR", "winnerAmount and receivedAmount must be positive", 400);
-  const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerAmount, receivedAmount, remainingAmount: winnerAmount - receivedAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
+  const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerAmount, receivedAmount, remainingAmount: winnerAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
   const result = await createWinner(winner);
   await updateCycle(cycle._id, { winnerId: result.insertedId, winnerAmount, receivedAmount, remainingAmount: winner.remainingAmount, status: "SETTLEMENT_PENDING" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_SELECTED", entityType: "WINNER", entityId: result.insertedId, requestId });
