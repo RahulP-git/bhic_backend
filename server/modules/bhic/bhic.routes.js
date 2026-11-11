@@ -32,7 +32,6 @@ import {
   recordCashCollection,
   removeGroupMember,
   resendMemberInformation,
-  saveSettlement,
   saveWinner,
   startBhicCycle,
   updateBhicGroup,
@@ -72,8 +71,6 @@ bhicRouter.get("/cycles/:cycleId/collections/summary", asyncHandler(async (req, 
 bhicRouter.get("/cycles/:cycleId/winner/eligible-members", asyncHandler(async (req, res) => successResponse(res, await eligibleWinners(req.params.cycleId, req.auth.user._id))));
 bhicRouter.post("/cycles/:cycleId/winner", asyncHandler(async (req, res) => successResponse(res, await saveWinner(req.params.cycleId, req.body, req.auth.user._id, req.requestId), 201)));
 bhicRouter.post("/cycles/:cycleId/winner/correct", asyncHandler(async (req, res) => successResponse(res, await correctSelectedWinner(req.params.cycleId, req.body?.reason, req.auth.user._id, req.requestId))));
-bhicRouter.post("/cycles/:cycleId/settlement", asyncHandler(async (req, res) => successResponse(res, await saveSettlement(req.params.cycleId, req.body, req.auth.user._id, req.requestId), 201)));
-
 bhicRouter.post("/cycles/:cycleId/distribution/draft", asyncHandler(async (req, res) => successResponse(res, await createDistributionDraft(req.params.cycleId, req.auth.user._id, req.requestId), 201)));
 bhicRouter.get("/cycles/:cycleId/distribution", asyncHandler(async (req, res) => successResponse(res, await getDistribution(req.params.cycleId, req.auth.user._id))));
 bhicRouter.patch("/cycles/:cycleId/distribution", asyncHandler(async (req, res) => successResponse(res, await updateDistributionInputs(req.params.cycleId, req.body, req.auth.user._id, req.requestId))));

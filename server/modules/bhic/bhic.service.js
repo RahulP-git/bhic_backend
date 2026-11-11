@@ -10,7 +10,6 @@ import { createCycles, findCycle, listCycles, updateCycle } from "../../models/c
 import { createParticipants, findParticipant, listParticipants, updateParticipant } from "../../models/cycle-participants.model.js";
 import { createCollection, correctCollection, findCollection, listCollections } from "../../models/cash-collections.model.js";
 import { correctWinner, createWinner, findWinner, hasMemberWon } from "../../models/winners.model.js";
-import { createSettlement, findSettlement } from "../../models/settlements.model.js";
 import { createDistribution, createDistributionItems, findDistribution, listDistributionItems, updateDistribution } from "../../models/distributions.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
 import { findUserById } from "../../models/users.model.js";
@@ -370,7 +369,7 @@ export const saveWinner = async (cycleId, body, userId, requestId) => {
   if (winnerBidAmount + winnerPayoutAmount !== cycle.expectedTotal) throw new AppError("VALIDATION_ERROR", "winnerBidAmount plus winnerPayoutAmount must equal the cycle expected total", 400);
   const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
   const result = await createWinner(winner);
-  await updateCycle(cycle._id, { winnerId: result.insertedId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, status: "SETTLEMENT_PENDING" });
+  await updateCycle(cycle._id, { winnerId: result.insertedId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, status: "DISTRIBUTION_PENDING" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_SELECTED", entityType: "WINNER", entityId: result.insertedId, requestId });
   return toPublic({ ...winner, _id: result.insertedId });
 };
@@ -384,24 +383,6 @@ export const correctSelectedWinner = async (cycleId, reason, userId, requestId) 
   await updateCycle(cycle._id, { winnerId: null, winnerBidAmount: null, winnerPayoutAmount: null, remainingAmount: null, status: "READY_FOR_WINNER_SELECTION" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_CORRECTED", entityType: "WINNER", entityId: winner._id, requestId, reason });
   return toPublic(updated.value || updated);
-};
-
-export const saveSettlement = async (cycleId, body, userId, requestId) => {
-  const cycle = await ensureCycle(cycleId, userId);
-  const winner = await findWinner(cycle._id);
-  if (!winner) throw new AppError("INVALID_STATE", "Winner must be selected first", 409);
-  if (await findSettlement(cycle._id)) throw new AppError("CONFLICT", "Settlement already recorded", 409);
-  const actualAmount = moneyToRupees(body.actualAmount, "actualAmount");
-  const expectedAmount = moneyToRupees(body.expectedAmount, "expectedAmount");
-  if (expectedAmount !== winner.winnerPayoutAmount) throw new AppError("AMOUNT_MISMATCH", "expectedAmount must match the winner payout amount", 400);
-  if (actualAmount !== expectedAmount) throw new AppError("AMOUNT_MISMATCH", "actualAmount must match expectedAmount", 400);
-  const method = body.method || "CASH";
-  if (!["CASH", "OFFLINE"].includes(method)) throw new AppError("VALIDATION_ERROR", "method must be CASH or OFFLINE", 400);
-  const settlement = { cycleId: cycle._id, winnerRecordId: winner._id, expectedAmount, actualAmount, method, reference: optionalString(body.reference, "reference", { max: 150 }), note: optionalString(body.note, "note", { max: 1000 }), settledBy: userId, settledAt: body.settledAt ? parseDate(body.settledAt, "settledAt") : now(), status: "SETTLED", createdAt: now() };
-  const result = await createSettlement(settlement);
-  await updateCycle(cycle._id, { status: "SETTLED" });
-  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_SETTLED", entityType: "SETTLEMENT", entityId: result.insertedId, requestId });
-  return toPublic({ ...settlement, _id: result.insertedId });
 };
 
 const calculateDistribution = (members, sourceAmount, interestRate) => {
@@ -423,7 +404,7 @@ const distributionMembers = async (cycle) => {
     if (winner && participant.memberId.toString() === winner.memberId.toString()) continue;
     if (!participant.previousWinnerFlag) {
       const member = await findMember(participant.memberId, cycle.groupId);
-      if (member) eligible.push(member);
+      if (member && member.membershipStatus === "ACTIVE") eligible.push(member);
     }
   }
   return eligible;
@@ -431,7 +412,7 @@ const distributionMembers = async (cycle) => {
 
 export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const cycle = await ensureCycle(cycleId, userId);
-  if (!["SETTLED", "DISTRIBUTION_DRAFT"].includes(cycle.status)) throw new AppError("INVALID_STATE", "Settlement must be completed before distribution", 409);
+  if (cycle.status !== "DISTRIBUTION_PENDING") throw new AppError("INVALID_STATE", "Cycle must be in DISTRIBUTION_PENDING before creating distribution draft", 409);
   const existing = await findDistribution(cycle._id);
   if (existing) return toPublic({ distribution: existing, items: await listDistributionItems(existing._id) });
   const group = await findGroupById(cycle.groupId);
@@ -443,7 +424,6 @@ export const createDistributionDraft = async (cycleId, userId, requestId) => {
   const distribution = { cycleId: cycle._id, groupId: cycle.groupId, sourceAmount, status: "DRAFT", ruleVersionId: group.activeRuleVersion, totalCalculatedAmount: itemInputs.reduce((sum, item) => sum + item.finalAmount, 0), roundingAdjustment: 0, interestRate: rate, createdBy: userId, createdAt: now(), updatedAt: now() };
   const result = await createDistribution(distribution);
   await createDistributionItems(itemInputs.map((item) => ({ ...item, distributionId: result.insertedId, cycleId: cycle._id, createdAt: now(), updatedAt: now() })));
-  await updateCycle(cycle._id, { status: "DISTRIBUTION_DRAFT" });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "DISTRIBUTION_DRAFT_CREATED", entityType: "DISTRIBUTION", entityId: result.insertedId, requestId });
   return toPublic({ distribution: { ...distribution, _id: result.insertedId }, items: await listDistributionItems(result.insertedId) });
 };
@@ -452,7 +432,27 @@ export const getDistribution = async (cycleId, userId) => {
   const cycle = await ensureCycle(cycleId, userId);
   const distribution = await findDistribution(cycle._id);
   if (!distribution) throw new AppError("NOT_FOUND", "Distribution draft not found", 404);
-  return toPublic({ distribution, items: await listDistributionItems(distribution._id) });
+  const winner = await findWinner(cycle._id);
+  const items = await listDistributionItems(distribution._id);
+  const transformedItems = [];
+  for (const item of items) {
+    const member = await findMember(item.memberId, cycle.groupId);
+    transformedItems.push({
+      memberId: item.memberId,
+      memberName: member ? member.fullName : null,
+      amount: item.finalAmount,
+      isWinner: winner && item.memberId.toString() === winner.memberId.toString(),
+    });
+  }
+  return toPublic({
+    cycleId: cycle._id,
+    cycleNumber: cycle.bhicNumber,
+    winnerMemberId: winner ? winner.memberId : null,
+    winnerBidAmount: cycle.winnerBidAmount,
+    winnerPayoutAmount: cycle.winnerPayoutAmount,
+    sourceAmount: distribution.sourceAmount,
+    items: transformedItems,
+  });
 };
 
 export const updateDistributionInputs = async (cycleId, body, userId, requestId) => {
@@ -475,18 +475,20 @@ export const updateDistributionInputs = async (cycleId, body, userId, requestId)
 
 export const validateDistribution = async (cycleId, userId) => {
   const result = await getDistribution(cycleId, userId);
-  const total = result.items.reduce((sum, item) => sum + item.finalAmount, 0);
-  const valid = result.items.length > 0 && result.distribution.sourceAmount >= 0 && total >= 0;
-  return { valid, totalCalculatedAmount: roundRupees(total), sourceAmount: roundRupees(result.distribution.sourceAmount), errors: valid ? [] : ["Distribution has no valid items"] };
+  const total = result.items.reduce((sum, item) => sum + item.amount, 0);
+  const valid = result.items.length > 0 && result.sourceAmount >= 0 && total >= 0;
+  return { valid, totalCalculatedAmount: roundRupees(total), sourceAmount: roundRupees(result.sourceAmount), errors: valid ? [] : ["Distribution has no valid items"] };
 };
 
 export const publishDistribution = async (cycleId, userId, requestId) => {
   const cycle = await ensureCycle(cycleId, userId);
+  if (cycle.status !== "DISTRIBUTION_PENDING") throw new AppError("INVALID_STATE", "Cycle must be in DISTRIBUTION_PENDING to publish distribution", 409);
   const distribution = await findDistribution(cycle._id);
   if (!distribution) throw new AppError("NOT_FOUND", "Distribution draft not found", 404);
   if (distribution.status === "PUBLISHED") return toPublic({ distribution, items: await listDistributionItems(distribution._id) });
   const validation = await validateDistribution(cycleId, userId);
   if (!validation.valid) throw new AppError("INVALID_STATE", "Distribution validation failed", 409, validation.errors);
+  if (validation.totalCalculatedAmount !== cycle.winnerBidAmount) throw new AppError("AMOUNT_MISMATCH", "Distribution total must equal winnerBidAmount", 409);
   const updated = await updateDistribution(cycle._id, { status: "PUBLISHED", publishedBy: userId, publishedAt: now() });
   await updateCycle(cycle._id, { status: "DISTRIBUTION_PUBLISHED" });
   await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "DISTRIBUTION_PUBLISHED", title: "Distribution published", body: `Distribution for BHIC ${cycle.bhicNumber} was published`, createdAt: now() });
@@ -499,8 +501,7 @@ export const completeBhicCycle = async (cycleId, userId, requestId) => {
   if (cycle.status === "COMPLETED") return toPublic(cycle);
   if (cycle.status !== "DISTRIBUTION_PUBLISHED") throw new AppError("INVALID_STATE", "Distribution must be published before completing the cycle", 409);
   const winner = await findWinner(cycle._id);
-  const settlement = await findSettlement(cycle._id);
-  if (!winner || !settlement) throw new AppError("INVALID_STATE", "Winner settlement is required before completion", 409);
+  if (!winner) throw new AppError("INVALID_STATE", "Winner is required before completing the cycle", 409);
   await getDatabase().collection("group_members").updateOne(
     { _id: winner.memberId },
     { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
