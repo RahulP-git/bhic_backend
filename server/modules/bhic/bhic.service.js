@@ -308,6 +308,34 @@ export const startBhicCycle = async (cycleId, userId, requestId) => {
   const group = await ensureGroup(cycle.groupId, userId);
   const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
   if (!members.length) throw new AppError("INVALID_STATE", "At least one active member is required", 409);
+
+  const skipContributionCollection = Boolean(cycle.skipContributionCollection);
+
+  if (skipContributionCollection) {
+    // No contributions required: skip member limit check and collection creation
+    const existingParticipants = await listParticipants(cycle._id);
+    if (!existingParticipants.length) {
+      const participants = members.map((member) => ({
+        cycleId: cycle._id,
+        memberId: member._id,
+        expectedContribution: 0,
+        collectedAmount: 0,
+        outstandingAmount: 0,
+        collectionStatus: "PAID",
+        eligibleForWinner: true,
+        previousWinnerFlag: Boolean(member.wonCycleIds?.length),
+        distributionStatus: "PENDING",
+        createdAt: now(),
+        updatedAt: now(),
+      }));
+      await createParticipants(participants);
+    }
+    const updated = await updateCycle(cycle._id, { status: "READY_FOR_WINNER_SELECTION", actualStart: now(), expectedTotal: cycle.sourceAmount || 0, totalCollected: 0, totalOutstanding: 0 });
+    await updateGroup(group._id, { currentCycleNumber: cycle.bhicNumber });
+    await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_STARTED", entityType: "CYCLE", entityId: cycle._id, requestId });
+    return toPublic(updated.value || updated);
+  }
+
   if (members.length !== group.memberLimit) {
     throw new AppError("INVALID_STATE", `Add all ${group.memberLimit - members.length} remaining member(s) before starting BHIC`, 409);
   }
@@ -363,8 +391,9 @@ export const correctCashCollection = async (cycleId, collectionId, reason, userI
 export const eligibleWinners = async (cycleId, userId) => {
   const cycle = await ensureCycle(cycleId, userId);
   const participants = await listParticipants(cycle._id);
+  const skipContributionCollection = Boolean(cycle.skipContributionCollection);
   const eligibleParticipants = participants.filter(
-    (item) => item.eligibleForWinner && !item.previousWinnerFlag && item.collectionStatus === "PAID"
+    (item) => item.eligibleForWinner && !item.previousWinnerFlag && (skipContributionCollection || item.collectionStatus === "PAID")
   );
   const members = await Promise.all(eligibleParticipants.map((item) => findMember(item.memberId, cycle.groupId)));
   const eligible = [];
@@ -427,6 +456,11 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       nextCycle: nextCycle ? {
         cycleId: nextCycle._id,
         cycleNumber: nextCycle.bhicNumber,
+        sourceAmount: nextCycle.sourceAmount || 0,
+        contributionRequired: nextCycle.contributionRequired !== false,
+        skipContributionCollection: nextCycle.skipContributionCollection === true,
+        amountSource: nextCycle.amountSource || null,
+        previousCycleId: nextCycle.previousCycleId || null,
         scheduledStart: nextCycle.scheduledStart,
         status: nextCycle.status,
         canStartImmediately: true,
@@ -476,16 +510,40 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       groupId: group._id,
       bhicNumber: nextCycleNumber,
       scheduledStart: cycle.scheduledStart,
-      status: "SCHEDULED",
-      expectedTotal: group.contributionAmount * group.memberLimit,
+      status: "READY_FOR_WINNER_SELECTION",
+      sourceAmount: winner.winnerBidAmount,
+      contributionRequired: false,
+      skipContributionCollection: true,
+      amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
+      previousCycleId: cycle._id,
+      expectedTotal: winner.winnerBidAmount,
       totalCollected: 0,
-      totalOutstanding: group.contributionAmount * group.memberLimit,
+      totalOutstanding: 0,
       activeRuleVersion: group.activeRuleVersion || 1,
       createdAt: now(),
       updatedAt: now(),
     }]);
     const insertedId = result.insertedIds ? result.insertedIds["0"] : result.insertedId;
     nextCycle = await findCycle(insertedId);
+
+    // Create participants with collectionStatus PAID since no contributions are required
+    const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
+    if (members.length) {
+      const participants = members.map((member) => ({
+        cycleId: nextCycle._id,
+        memberId: member._id,
+        expectedContribution: 0,
+        collectedAmount: 0,
+        outstandingAmount: 0,
+        collectionStatus: "PAID",
+        eligibleForWinner: true,
+        previousWinnerFlag: Boolean(member.wonCycleIds?.length),
+        distributionStatus: "PENDING",
+        createdAt: now(),
+        updatedAt: now(),
+      }));
+      await createParticipants(participants);
+    }
   }
 
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "NEXT_CYCLE_CREATED", entityType: "CYCLE", entityId: nextCycle._id, requestId, afterSummary: { cycleNumber: nextCycleNumber } });
@@ -502,6 +560,11 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     nextCycle: {
       cycleId: nextCycle._id,
       cycleNumber: nextCycle.bhicNumber,
+      sourceAmount: nextCycle.sourceAmount || 0,
+      contributionRequired: nextCycle.contributionRequired !== false,
+      skipContributionCollection: nextCycle.skipContributionCollection === true,
+      amountSource: nextCycle.amountSource || null,
+      previousCycleId: nextCycle.previousCycleId || null,
       scheduledStart: nextCycle.scheduledStart,
       status: nextCycle.status,
       canStartImmediately: true,
