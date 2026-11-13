@@ -489,13 +489,16 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     { _id: winner.memberId },
     { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
   );
+  const carryForwardAmount = Math.max(0, winner.winnerPayoutAmount - winner.winnerBidAmount);
+  const collectionTotal = group.contributionAmount * group.memberLimit;
+  const adjustedSourceAmount = collectionTotal - carryForwardAmount;
   await updateCycle(cycle._id, {
     status: "COMPLETED",
     completedAt: now(),
     completionDecision: "START_NEXT_CYCLE",
     completionDecisionAt: now(),
     undistributedAmount: winner.winnerBidAmount,
-    carryForwardAmount: 0,
+    carryForwardAmount,
   });
   await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `BHIC ${cycle.bhicNumber} has been completed`, createdAt: now() });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
@@ -511,12 +514,12 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       bhicNumber: nextCycleNumber,
       scheduledStart: cycle.scheduledStart,
       status: "READY_FOR_WINNER_SELECTION",
-      sourceAmount: winner.winnerBidAmount,
+      sourceAmount: adjustedSourceAmount,
       contributionRequired: false,
       skipContributionCollection: true,
       amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
       previousCycleId: cycle._id,
-      expectedTotal: winner.winnerBidAmount,
+      expectedTotal: adjustedSourceAmount,
       totalCollected: 0,
       totalOutstanding: 0,
       activeRuleVersion: group.activeRuleVersion || 1,
@@ -555,7 +558,7 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     winnerBidAmount: winner.winnerBidAmount,
     winnerPayoutAmount: winner.winnerPayoutAmount,
     undistributedAmount: winner.winnerBidAmount,
-    carryForwardAmount: 0,
+    carryForwardAmount,
     status: "COMPLETED",
     nextCycle: {
       cycleId: nextCycle._id,
