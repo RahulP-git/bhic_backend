@@ -513,7 +513,7 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       groupId: group._id,
       bhicNumber: nextCycleNumber,
       scheduledStart: cycle.scheduledStart,
-      status: "READY_FOR_WINNER_SELECTION",
+      status: "SCHEDULED",
       sourceAmount: adjustedSourceAmount,
       contributionRequired: false,
       skipContributionCollection: true,
