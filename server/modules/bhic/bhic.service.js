@@ -547,6 +547,38 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       }));
       await createParticipants(participants);
     }
+  } else {
+    // Cycle was pre-created during group creation; update it with carry-forward fields
+    await updateCycle(nextCycle._id, {
+      sourceAmount: adjustedSourceAmount,
+      contributionRequired: false,
+      skipContributionCollection: true,
+      amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
+      previousCycleId: cycle._id,
+      expectedTotal: adjustedSourceAmount,
+      status: "READY_FOR_WINNER_SELECTION",
+    });
+    nextCycle = await findCycle(nextCycle._id);
+
+    // Ensure participants exist with PAID status since no contributions are required
+    const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
+    const existingParticipants = await listParticipants(nextCycle._id);
+    if (members.length && !existingParticipants.length) {
+      const participants = members.map((member) => ({
+        cycleId: nextCycle._id,
+        memberId: member._id,
+        expectedContribution: 0,
+        collectedAmount: 0,
+        outstandingAmount: 0,
+        collectionStatus: "PAID",
+        eligibleForWinner: true,
+        previousWinnerFlag: Boolean(member.wonCycleIds?.length),
+        distributionStatus: "PENDING",
+        createdAt: now(),
+        updatedAt: now(),
+      }));
+      await createParticipants(participants);
+    }
   }
 
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "NEXT_CYCLE_CREATED", entityType: "CYCLE", entityId: nextCycle._id, requestId, afterSummary: { cycleNumber: nextCycleNumber } });
