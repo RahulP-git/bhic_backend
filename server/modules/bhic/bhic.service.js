@@ -489,6 +489,7 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     { _id: winner.memberId },
     { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
   );
+  const group = await ensureGroup(cycle.groupId, userId);
   const carryForwardAmount = Math.max(0, winner.winnerPayoutAmount - winner.winnerBidAmount);
   const collectionTotal = group.contributionAmount * group.memberLimit;
   const adjustedSourceAmount = collectionTotal - carryForwardAmount;
@@ -500,10 +501,9 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     undistributedAmount: winner.winnerBidAmount,
     carryForwardAmount,
   });
-  await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `BHIC ${cycle.bhicNumber} has been completed`, createdAt: now() });
+  await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `Distribution for BHIC ${cycle.bhicNumber} was published`, createdAt: now() });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
 
-  const group = await ensureGroup(cycle.groupId, userId);
   const nextCycleNumber = cycle.bhicNumber + 1;
   const existingCycles = await listCycles(group._id);
   let nextCycle = existingCycles.find((c) => c.bhicNumber === nextCycleNumber);
