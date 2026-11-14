@@ -490,9 +490,8 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
   );
   const group = await ensureGroup(cycle.groupId, userId);
-  const carryForwardAmount = Math.max(0, winner.winnerPayoutAmount - winner.winnerBidAmount);
-  const collectionTotal = group.contributionAmount * group.memberLimit;
-  const adjustedSourceAmount = collectionTotal - carryForwardAmount;
+  const carryForwardAmount = winner.winnerBidAmount;
+  const adjustedSourceAmount = carryForwardAmount;
   await updateCycle(cycle._id, {
     status: "COMPLETED",
     completedAt: now(),
