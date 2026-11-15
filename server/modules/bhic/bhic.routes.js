@@ -31,6 +31,7 @@ import {
   readAllNotifications,
   readNotification,
   recordCashCollection,
+  registerMember,
   removeGroupMember,
   resendMemberInformation,
   saveWinner,
@@ -45,6 +46,7 @@ export const bhicRouter = Router();
 bhicRouter.use(requireAuth);
 
 bhicRouter.post("/groups", asyncHandler(async (req, res) => successResponse(res, await createBhicGroup(req.body, req.auth.user._id, req.requestId), 201)));
+bhicRouter.post("/members", asyncHandler(async (req, res) => successResponse(res, await registerMember(req.body, req.auth.user._id, req.requestId), 201)));
 bhicRouter.get("/groups", asyncHandler(async (req, res) => successResponse(res, await getGroups(req.auth.user._id, req.query))));
 bhicRouter.get("/groups/:groupId", asyncHandler(async (req, res) => successResponse(res, await getGroup(req.params.groupId, req.auth.user._id))));
 bhicRouter.patch("/groups/:groupId", asyncHandler(async (req, res) => successResponse(res, await updateBhicGroup(req.params.groupId, req.body, req.auth.user._id, req.requestId))));

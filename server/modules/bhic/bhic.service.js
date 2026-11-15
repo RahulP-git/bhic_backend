@@ -125,7 +125,7 @@ const validateGroupInput = (body) => {
     throw new AppError("VALIDATION_ERROR", "cycleIntervalDays must be a positive integer for EVERY_15_DAYS", 400);
   }
   const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
-  const memberLimit = Number(body.memberLimit);
+  const memberLimit = body.memberLimit === undefined || body.memberLimit === null ? 1 : Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
     throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
   }
@@ -156,15 +156,72 @@ const buildCycles = (groupId, input, count, startNumber = 1) => {
   });
 };
 
+const associateMembersWithGroup = async (groupId, memberIds, userId, requestId) => {
+  const membersCollection = getDatabase().collection("group_members");
+  const nowValue = now();
+  const objectIds = memberIds.map((id) => toObjectId(id, "memberId"));
+  const existingMembers = await membersCollection.find({ _id: { $in: objectIds } }).toArray();
+  if (existingMembers.length !== objectIds.length) {
+    throw new AppError("NOT_FOUND", "One or more members not found", 404);
+  }
+  for (const member of existingMembers) {
+    if (member.groupId !== null && member.groupId !== undefined) {
+      throw new AppError("INVALID_STATE", `Member ${member.fullName || member._id} is already assigned to a group`, 409);
+    }
+  }
+  const phones = existingMembers.map((m) => m.normalizedPrimaryContact);
+  if (new Set(phones).size !== phones.length) {
+    throw new AppError("VALIDATION_ERROR", "Duplicate mobile numbers among selected members", 400);
+  }
+  const updates = existingMembers.map((member, index) => ({
+    updateOne: {
+      filter: { _id: member._id },
+      update: {
+        $set: {
+          groupId: groupId,
+          membershipStatus: "ACTIVE",
+          memberOrder: index + 1,
+          updatedAt: nowValue,
+        },
+      },
+    },
+  }));
+  if (updates.length) {
+    await membersCollection.bulkWrite(updates);
+  }
+  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "MEMBERS_ASSIGNED_TO_GROUP", entityType: "GROUP", entityId: groupId, requestId, afterSummary: { memberCount: existingMembers.length } });
+};
+
 export const createBhicGroup = async (body, userId, requestId) => {
   const input = validateGroupInput(body);
   const createdAt = now();
-  const group = { ...input, managerId: userId, status: "ACTIVE", currentCycleNumber: 1, activeRuleVersion: 1, createdAt, updatedAt: createdAt };
+
+  // Optionally pre-assign already-registered (unassigned) members to this group.
+  // When provided, memberLimit = manager + selected members.
+  const memberIds = Array.isArray(body.memberIds) ? body.memberIds.map(String).filter(Boolean) : [];
+  let effectiveMemberLimit = input.memberLimit;
+  if (memberIds.length > 0) {
+    effectiveMemberLimit = memberIds.length + 1;
+  }
+
+  const group = { ...input, managerId: userId, status: "ACTIVE", currentCycleNumber: 1, activeRuleVersion: 1, createdAt, updatedAt: createdAt, memberLimit: effectiveMemberLimit };
   const result = await createGroup(group);
   const groupId = result.insertedId;
   await getDatabase().collection("group_rule_versions").insertOne({ groupId, version: 1, ...input.rules, effectiveFrom: createdAt, createdBy: userId, createdAt });
-  await ensureManagerMember({ ...group, _id: groupId }, userId);
-  await createCycles(buildCycles(groupId, input, input.memberLimit));
+
+  const managerMember = await ensureManagerMember({ ...group, _id: groupId }, userId);
+  const managerMemberId = managerMember._id ? managerMember._id.toString() : null;
+
+  // Associate pre-registered members with this group (skip the manager if present)
+  const memberIdsToAssociate = memberIds.filter((id) => id !== managerMemberId);
+  if (memberIdsToAssociate.length > 0) {
+    await associateMembersWithGroup(groupId, memberIdsToAssociate, userId, requestId);
+    effectiveMemberLimit = 1 + memberIdsToAssociate.length;
+    await updateGroup(groupId, { memberLimit: effectiveMemberLimit });
+    group.memberLimit = effectiveMemberLimit;
+  }
+
+  await createCycles(buildCycles(groupId, { ...input, memberLimit: effectiveMemberLimit }, effectiveMemberLimit));
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "GROUP_CREATED", entityType: "GROUP", entityId: groupId, requestId });
   return toPublic({ ...group, _id: groupId });
 };
@@ -222,6 +279,40 @@ export const addGroupMember = async (groupId, body, user, requestId) => {
   const message = await queueMemberInformation(group, { ...member, _id: memberId }, user);
   await writeAuditLog({ actorType: "MANAGER", actorId: user._id, action: "MEMBER_CREATED", entityType: "GROUP_MEMBER", entityId: memberId, requestId });
   return { member: toPublic({ ...member, _id: memberId }), message: toPublic(message) };
+};
+
+export const registerMember = async (body, userId, requestId) => {
+  const fullName = requireString(body.fullName, "fullName", { min: 2, max: 150 });
+  const primaryContactNumber = normalizeMobileNumber(body.primaryContactNumber);
+  const optionalContactNumber = body.optionalContactNumber ? normalizeMobileNumber(body.optionalContactNumber) : undefined;
+  const address = requireString(body.address, "address", { min: 5, max: 1000 });
+  const description = optionalString(body.description, "description", { max: 1000 });
+
+  const normalizedPrimaryContact = primaryContactNumber;
+  const duplicate = await getDatabase().collection("group_members").findOne({ normalizedPrimaryContact });
+  if (duplicate) throw new AppError("DUPLICATE_MEMBER", "Member with this mobile number already exists", 409);
+
+  const member = {
+    groupId: null,
+    isManager: false,
+    memberOrder: null,
+    fullName,
+    primaryContactNumber,
+    normalizedPrimaryContact,
+    optionalContactNumber,
+    address,
+    description,
+    membershipStatus: "ACTIVE",
+    allocationStatus: "NOT_ALLOCATED",
+    wonCycleIds: [],
+    joinedAt: now(),
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  const result = await createMember(member);
+  const memberId = result.insertedId;
+  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "MEMBER_REGISTERED", entityType: "GROUP_MEMBER", entityId: memberId, requestId });
+  return { member: toPublic({ ...member, _id: memberId }) };
 };
 
 const queueMemberInformation = async (group, member, user) => {
