@@ -339,9 +339,17 @@ export const startBhicCycle = async (cycleId, userId, requestId) => {
   if (members.length !== group.memberLimit) {
     throw new AppError("INVALID_STATE", `Add all ${group.memberLimit - members.length} remaining member(s) before starting BHIC`, 409);
   }
-  const participants = members.map((member) => ({ cycleId: cycle._id, memberId: member._id, expectedContribution: group.contributionAmount, collectedAmount: 0, outstandingAmount: group.contributionAmount, collectionStatus: "UNPAID", eligibleForWinner: true, previousWinnerFlag: Boolean(member.wonCycleIds?.length), distributionStatus: "PENDING", createdAt: now(), updatedAt: now() }));
-  await createParticipants(participants);
-  const updated = await updateCycle(cycle._id, { status: "COLLECTING_CONTRIBUTIONS", actualStart: now(), expectedTotal: group.contributionAmount * members.length, totalOutstanding: group.contributionAmount * members.length });
+  const existingParticipants = await listParticipants(cycle._id);
+  if (!existingParticipants.length) {
+    const participants = members.map((member) => ({ cycleId: cycle._id, memberId: member._id, expectedContribution: group.contributionAmount, collectedAmount: 0, outstandingAmount: group.contributionAmount, collectionStatus: "UNPAID", eligibleForWinner: true, previousWinnerFlag: Boolean(member.wonCycleIds?.length), distributionStatus: "PENDING", createdAt: now(), updatedAt: now() }));
+    await createParticipants(participants);
+  }
+  const cycleUpdates = { status: "COLLECTING_CONTRIBUTIONS", actualStart: now() };
+  if (!existingParticipants.length) {
+    cycleUpdates.expectedTotal = group.contributionAmount * members.length;
+    cycleUpdates.totalOutstanding = group.contributionAmount * members.length;
+  }
+  const updated = await updateCycle(cycle._id, cycleUpdates);
   await updateGroup(group._id, { currentCycleNumber: cycle.bhicNumber });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_STARTED", entityType: "CYCLE", entityId: cycle._id, requestId });
   return toPublic(updated.value || updated);
@@ -503,6 +511,29 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
   await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `Distribution for BHIC ${cycle.bhicNumber} was published`, createdAt: now() });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
 
+  // Determine if previous cycle has a published distribution with interest
+  const distribution = await findDistribution(cycle._id);
+  const hasPublishedDistribution = Boolean(distribution && distribution.status === "PUBLISHED");
+  let skipContributionCollection = true;
+  let nextCycleStatus = "READY_FOR_WINNER_SELECTION";
+  let nextExpectedTotal = adjustedSourceAmount;
+  let nextTotalOutstanding = 0;
+  const memberDistributedAmounts = new Map();
+
+  if (hasPublishedDistribution) {
+    const distributionItems = await listDistributionItems(distribution._id);
+    let sumOfDistributedTotals = 0;
+    for (const item of distributionItems) {
+      const totalAmount = item.totalAmount || item.amount || 0;
+      memberDistributedAmounts.set(item.memberId.toString(), totalAmount);
+      sumOfDistributedTotals += totalAmount;
+    }
+    skipContributionCollection = false;
+    nextCycleStatus = "COLLECTING_CONTRIBUTIONS";
+    nextExpectedTotal = group.contributionAmount * group.memberLimit + sumOfDistributedTotals;
+    nextTotalOutstanding = nextExpectedTotal;
+  }
+
   const nextCycleNumber = cycle.bhicNumber + 1;
   const existingCycles = await listCycles(group._id);
   let nextCycle = existingCycles.find((c) => c.bhicNumber === nextCycleNumber);
@@ -513,14 +544,14 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       bhicNumber: nextCycleNumber,
       scheduledStart: cycle.scheduledStart,
       status: "SCHEDULED",
-      sourceAmount: adjustedSourceAmount,
-      contributionRequired: false,
-      skipContributionCollection: true,
-      amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
+      sourceAmount: nextExpectedTotal,
+      contributionRequired: !skipContributionCollection,
+      skipContributionCollection,
+      amountSource: hasPublishedDistribution ? "PREVIOUS_CYCLE_DISTRIBUTION_WITH_INTEREST" : "PREVIOUS_CYCLE_REMAINING_AMOUNT",
       previousCycleId: cycle._id,
-      expectedTotal: adjustedSourceAmount,
+      expectedTotal: nextExpectedTotal,
       totalCollected: 0,
-      totalOutstanding: 0,
+      totalOutstanding: nextTotalOutstanding,
       activeRuleVersion: group.activeRuleVersion || 1,
       createdAt: now(),
       updatedAt: now(),
@@ -528,61 +559,66 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     const insertedId = result.insertedIds ? result.insertedIds["0"] : result.insertedId;
     nextCycle = await findCycle(insertedId);
 
-    // Create participants with collectionStatus PAID since no contributions are required
     const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
     if (members.length) {
-      const participants = members.map((member) => ({
-        cycleId: nextCycle._id,
-        memberId: member._id,
-        expectedContribution: 0,
-        collectedAmount: 0,
-        outstandingAmount: 0,
-        collectionStatus: "PAID",
-        eligibleForWinner: true,
-        previousWinnerFlag: Boolean(member.wonCycleIds?.length),
-        distributionStatus: "PENDING",
-        createdAt: now(),
-        updatedAt: now(),
-      }));
+      const participants = members.map((member) => {
+        const distributedTotal = memberDistributedAmounts.get(member._id.toString()) || 0;
+        const expectedContribution = skipContributionCollection ? 0 : group.contributionAmount + distributedTotal;
+        return {
+          cycleId: nextCycle._id,
+          memberId: member._id,
+          expectedContribution,
+          collectedAmount: 0,
+          outstandingAmount: expectedContribution,
+          collectionStatus: skipContributionCollection ? "PAID" : "UNPAID",
+          eligibleForWinner: true,
+          previousWinnerFlag: Boolean(member.wonCycleIds?.length),
+          distributionStatus: "PENDING",
+          createdAt: now(),
+          updatedAt: now(),
+        };
+      });
       await createParticipants(participants);
     }
   } else {
-    // Cycle was pre-created during group creation; update it with carry-forward fields
     await updateCycle(nextCycle._id, {
-      sourceAmount: adjustedSourceAmount,
-      contributionRequired: false,
-      skipContributionCollection: true,
-      amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
+      sourceAmount: nextExpectedTotal,
+      contributionRequired: !skipContributionCollection,
+      skipContributionCollection,
+      amountSource: hasPublishedDistribution ? "PREVIOUS_CYCLE_DISTRIBUTION_WITH_INTEREST" : "PREVIOUS_CYCLE_REMAINING_AMOUNT",
       previousCycleId: cycle._id,
-      expectedTotal: adjustedSourceAmount,
+      expectedTotal: nextExpectedTotal,
       totalCollected: 0,
-      totalOutstanding: 0,
-      status: "READY_FOR_WINNER_SELECTION",
+      totalOutstanding: nextTotalOutstanding,
+      status: nextCycleStatus,
     });
     nextCycle = await findCycle(nextCycle._id);
 
-    // Ensure participants exist with PAID status since no contributions are required
     const members = await listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit);
     const existingParticipants = await listParticipants(nextCycle._id);
     if (members.length && !existingParticipants.length) {
-      const participants = members.map((member) => ({
-        cycleId: nextCycle._id,
-        memberId: member._id,
-        expectedContribution: 0,
-        collectedAmount: 0,
-        outstandingAmount: 0,
-        collectionStatus: "PAID",
-        eligibleForWinner: true,
-        previousWinnerFlag: Boolean(member.wonCycleIds?.length),
-        distributionStatus: "PENDING",
-        createdAt: now(),
-        updatedAt: now(),
-      }));
+      const participants = members.map((member) => {
+        const distributedTotal = memberDistributedAmounts.get(member._id.toString()) || 0;
+        const expectedContribution = skipContributionCollection ? 0 : group.contributionAmount + distributedTotal;
+        return {
+          cycleId: nextCycle._id,
+          memberId: member._id,
+          expectedContribution,
+          collectedAmount: 0,
+          outstandingAmount: expectedContribution,
+          collectionStatus: skipContributionCollection ? "PAID" : "UNPAID",
+          eligibleForWinner: true,
+          previousWinnerFlag: Boolean(member.wonCycleIds?.length),
+          distributionStatus: "PENDING",
+          createdAt: now(),
+          updatedAt: now(),
+        };
+      });
       await createParticipants(participants);
     }
   }
 
-  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "NEXT_CYCLE_CREATED", entityType: "CYCLE", entityId: nextCycle._id, requestId, afterSummary: { cycleNumber: nextCycleNumber } });
+  await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "NEXT_CYCLE_CREATED", entityType: "CYCLE", entityId: nextCycle._id, requestId, afterSummary: { cycleNumber: nextCycleNumber, skipContributionCollection, expectedTotal: nextExpectedTotal } });
 
   return toPublic({
     cycleId: cycle._id,
