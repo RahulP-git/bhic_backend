@@ -555,6 +555,8 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
       amountSource: "PREVIOUS_CYCLE_REMAINING_AMOUNT",
       previousCycleId: cycle._id,
       expectedTotal: adjustedSourceAmount,
+      totalCollected: 0,
+      totalOutstanding: 0,
       status: "READY_FOR_WINNER_SELECTION",
     });
     nextCycle = await findCycle(nextCycle._id);
