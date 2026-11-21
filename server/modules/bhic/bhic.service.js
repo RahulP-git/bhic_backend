@@ -9,7 +9,7 @@ import { countGroups, createGroup, findGroup, findGroupById, listGroups, updateG
 import { createCycles, findCycle, listCycles, updateCycle } from "../../models/cycles.model.js";
 import { createParticipants, findParticipant, listParticipants, updateParticipant } from "../../models/cycle-participants.model.js";
 import { createCollection, correctCollection, findCollection, listCollections } from "../../models/cash-collections.model.js";
-import { correctWinner, createWinner, findWinner, hasMemberWon } from "../../models/winners.model.js";
+import { correctWinner, createWinner, findWinner, hasMemberWon, listWinners } from "../../models/winners.model.js";
 import { createDistribution, createDistributionItems, findDistribution, listDistributionItems, updateDistribution } from "../../models/distributions.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
 import { findUserById } from "../../models/users.model.js";
@@ -118,8 +118,8 @@ const validateGroupInput = (body) => {
   const startTime = requireString(body.startTime, "startTime", { min: 5, max: 5 });
   if (!/^\d{2}:\d{2}$/.test(startTime)) throw new AppError("VALIDATION_ERROR", "startTime must use HH:mm", 400);
   const timezone = requireString(body.timezone || "Asia/Kolkata", "timezone", { min: 3, max: 100 });
-  const cyclePeriod = body.cyclePeriod || "MONTHLY";
-  if (!["MONTHLY", "EVERY_15_DAYS"].includes(cyclePeriod)) throw new AppError("VALIDATION_ERROR", "cyclePeriod must be MONTHLY or EVERY_15_DAYS", 400);
+  const cyclePeriod = body.cyclePeriod || body.frequency || "MONTHLY";
+  if (!["MONTHLY", "WEEKLY", "EVERY_15_DAYS"].includes(cyclePeriod)) throw new AppError("VALIDATION_ERROR", "cyclePeriod must be MONTHLY, WEEKLY, or EVERY_15_DAYS", 400);
   const cycleIntervalDays = body.cycleIntervalDays === undefined || body.cycleIntervalDays === null ? null : Number(body.cycleIntervalDays);
   if (cyclePeriod === "EVERY_15_DAYS" && (!Number.isInteger(cycleIntervalDays) || cycleIntervalDays < 1)) {
     throw new AppError("VALIDATION_ERROR", "cycleIntervalDays must be a positive integer for EVERY_15_DAYS", 400);
@@ -140,6 +140,8 @@ const buildCycles = (groupId, input, count, startNumber = 1) => {
   return Array.from({ length: count }, (_, index) => {
     const scheduledStart = input.cyclePeriod === "EVERY_15_DAYS"
       ? addDays(first, input.cycleIntervalDays * index)
+      : input.cyclePeriod === "WEEKLY"
+        ? addDays(first, 7 * index)
       : addMonths(first, index + startNumber - 1);
     return {
       groupId,
@@ -232,7 +234,35 @@ export const getGroups = async (userId, query) => {
   const filter = query.status ? { status: query.status } : {};
   if (query.search) filter.name = { $regex: String(query.search).trim(), $options: "i" };
   const [items, total] = await Promise.all([listGroups(userId, filter, (pageNumber - 1) * limit, limit), countGroups(userId, filter)]);
-  return { items: toPublic(items), total, page: pageNumber, pageSize: limit, hasNextPage: pageNumber * limit < total };
+  const summaries = await Promise.all(items.map(async (group) => {
+    const [activeMemberCount, cycles] = await Promise.all([
+      countActiveMembers(group._id),
+      listCycles(group._id),
+    ]);
+    const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1] || null;
+    const completedCycleCount = cycles.filter((cycle) => cycle.status === "COMPLETED").length;
+    return {
+      groupId: group._id,
+      groupName: group.name,
+      status: group.status,
+      totalMembers: group.memberLimit,
+      activeMembers: activeMemberCount,
+      contributionAmount: group.contributionAmount,
+      totalFund: group.totalBhicAmount,
+      currentBhishiNumber: currentCycle?.bhicNumber || 0,
+      currentCycleId: currentCycle?._id || null,
+      currentCycleStatus: currentCycle?.status || null,
+      nextScheduledDateTime: currentCycle?.scheduledStart || null,
+      completedCycleCount,
+      progress: {
+        completed: completedCycleCount,
+        total: group.memberLimit,
+        percentage: group.memberLimit ? Math.round((completedCycleCount / group.memberLimit) * 100) : 0,
+      },
+      group,
+    };
+  }));
+  return { items: toPublic(summaries), total, page: pageNumber, pageSize: limit, hasNextPage: pageNumber * limit < total };
 };
 
 export const getGroup = async (groupId, userId) => toPublic(await ensureGroup(groupId, userId));
@@ -269,11 +299,12 @@ export const addGroupMember = async (groupId, body, user, requestId) => {
   const optionalContactNumber = body.optionalContactNumber ? normalizeMobileNumber(body.optionalContactNumber) : undefined;
   const address = requireString(body.address, "address", { min: 5, max: 1000 });
   const description = optionalString(body.description, "description", { max: 1000 });
+  const photoUrl = optionalString(body.photoUrl, "photoUrl", { max: 2000 });
   const activeCount = await countActiveMembers(group._id);
   if (activeCount >= group.memberLimit) throw new AppError("CONFLICT", "Group member limit has been reached", 409);
   const duplicate = await getDatabase().collection("group_members").findOne({ groupId: group._id, normalizedPrimaryContact: primaryContactNumber, membershipStatus: { $ne: "REMOVED" } });
   if (duplicate) throw new AppError("DUPLICATE_MEMBER", "Member already exists in this group", 409);
-  const member = { groupId: group._id, isManager: false, memberOrder: activeCount + 1, fullName, primaryContactNumber, normalizedPrimaryContact: primaryContactNumber, optionalContactNumber, address, description, membershipStatus: "ACTIVE", allocationStatus: "NOT_ALLOCATED", wonCycleIds: [], joinedAt: now(), createdAt: now(), updatedAt: now() };
+  const member = { groupId: group._id, isManager: false, memberOrder: activeCount + 1, fullName, primaryContactNumber, normalizedPrimaryContact: primaryContactNumber, optionalContactNumber, address, description, photoUrl, membershipStatus: "ACTIVE", allocationStatus: "NOT_ALLOCATED", wonCycleIds: [], joinedAt: now(), createdAt: now(), updatedAt: now() };
   const result = await createMember(member);
   const memberId = result.insertedId;
   const message = await queueMemberInformation(group, { ...member, _id: memberId }, user);
@@ -334,6 +365,14 @@ export const getGroupMembers = async (groupId, query, userId) => {
   const limit = page(query.limit, 50, 100);
   const pageNumber = page(query.page, 1, 1000000);
   const filter = query.status ? { membershipStatus: String(query.status).toUpperCase() } : {};
+  if (query.search) {
+    const search = String(query.search).trim();
+    if (search) filter.$or = [
+      { fullName: { $regex: search, $options: "i" } },
+      { primaryContactNumber: { $regex: search, $options: "i" } },
+      { normalizedPrimaryContact: { $regex: search, $options: "i" } },
+    ];
+  }
   const [items, total] = await Promise.all([listMembers(group._id, filter, (pageNumber - 1) * limit, limit), countMembers(group._id, filter)]);
   return { items: toPublic(items), total, page: pageNumber, pageSize: limit, hasNextPage: pageNumber * limit < total };
 };
@@ -342,8 +381,29 @@ export const getGroupMember = async (groupId, memberId, userId) => {
   const group = await ensureGroup(groupId, userId);
   const member = await findMember(toObjectId(memberId, "memberId"), group._id);
   if (!member) throw new AppError("NOT_FOUND", "Member not found", 404);
-  const collections = await getDatabase().collection("cash_collections").find({ memberId: member._id }).toArray();
-  return toPublic({ ...member, collectionSummary: { total: collections.reduce((sum, item) => sum + item.amount, 0), count: collections.length } });
+  const [collections, cycles, winners, distributionItems] = await Promise.all([
+    getDatabase().collection("cash_collections").find({ memberId: member._id, status: { $ne: "CORRECTED" } }).sort({ collectedAt: -1 }).toArray(),
+    listCycles(group._id),
+    getDatabase().collection("winners").find({ groupId: group._id, memberId: member._id, status: { $ne: "CORRECTED" } }).sort({ selectedAt: -1 }).toArray(),
+    getDatabase().collection("distribution_items").find({ memberId: member._id, status: { $ne: "CORRECTED" } }).toArray(),
+  ]);
+  const collectedTotal = collections.reduce((sum, item) => sum + item.amount, 0);
+  const receivedTotal = distributionItems.reduce((sum, item) => sum + (item.totalAmount || item.amount || 0), 0);
+  const cycleHistory = cycles.map((cycle) => ({
+    cycleId: cycle._id,
+    bhicNumber: cycle.bhicNumber,
+    status: cycle.status,
+    scheduledStart: cycle.scheduledStart,
+    collections: collections.filter((item) => item.cycleId.toString() === cycle._id.toString()).reduce((sum, item) => sum + item.amount, 0),
+    winner: winners.find((winner) => winner.cycleId.toString() === cycle._id.toString()) || null,
+  }));
+  return toPublic({
+    ...member,
+    collectionSummary: { total: collectedTotal, count: collections.length, totalCollected: collectedTotal },
+    receivedSummary: { total: receivedTotal, count: distributionItems.length },
+    winnerHistory: winners,
+    cycleHistory,
+  });
 };
 
 export const updateGroupMember = async (groupId, memberId, body, userId, requestId) => {
@@ -356,6 +416,7 @@ export const updateGroupMember = async (groupId, memberId, body, userId, request
   if (body.optionalContactNumber !== undefined) updates.optionalContactNumber = body.optionalContactNumber ? normalizeMobileNumber(body.optionalContactNumber) : null;
   if (body.address !== undefined) updates.address = requireString(body.address, "address", { min: 5, max: 1000 });
   if (body.description !== undefined) updates.description = optionalString(body.description, "description", { max: 1000 });
+  if (body.photoUrl !== undefined) updates.photoUrl = optionalString(body.photoUrl, "photoUrl", { max: 2000 });
   if (!Object.keys(updates).length) throw new AppError("VALIDATION_ERROR", "No editable fields provided", 400);
   const updated = await updateMember(member._id, updates);
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "MEMBER_UPDATED", entityType: "GROUP_MEMBER", entityId: member._id, requestId, afterSummary: updates });
@@ -919,9 +980,27 @@ export const getGroupDashboard = async (groupId, userId) => {
     listNotifications(userId, 0, 5),
   ]);
   const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1];
+  const participants = currentCycle ? await listParticipants(currentCycle._id) : [];
+  const winners = await listWinners(group._id);
+  const winnerMemberIds = winners.map((winner) => winner.memberId).filter(Boolean);
+  const winnerMembers = winnerMemberIds.length ? await getDatabase().collection("group_members").find({ _id: { $in: winnerMemberIds } }).toArray() : [];
+  const winnerNames = new Map(winnerMembers.map((member) => [member._id.toString(), member.fullName]));
+  const winnerHistory = winners.map((winner) => ({ ...winner, memberName: winnerNames.get(winner.memberId.toString()) || null }));
+  const paidMemberCount = participants.filter((item) => item.collectionStatus === "PAID").length;
+  const pendingMemberCount = participants.filter((item) => ["UNPAID", "PARTIAL"].includes(item.collectionStatus)).length;
   const loggedInMember = members.find((member) => member.isManager) || members[0] || null;
   const managerFirstName = loggedInMember?.fullName?.trim().split(/\s+/)[0] || null;
   return toPublic({
+    groupId: group._id,
+    groupName: group.name,
+    totalFund: group.totalBhicAmount,
+    totalCollected: currentCycle?.totalCollected || 0,
+    totalOutstanding: currentCycle?.totalOutstanding || 0,
+    paidMemberCount,
+    pendingMemberCount,
+    nextScheduledDateTime: currentCycle?.scheduledStart || null,
+    memberPreview: members,
+    winnerHistory,
     group,
     managerName: loggedInMember?.fullName || null,
     managerFirstName,
@@ -944,6 +1023,8 @@ export const getGroupDashboard = async (groupId, userId) => {
       totalCollected: currentCycle.totalCollected,
       totalOutstanding: currentCycle.totalOutstanding,
       winnerId: currentCycle.winnerId,
+      currentCycleId: currentCycle._id,
+      currentCycleStatus: currentCycle.status,
     } : null,
     recentNotifications: notifications,
   });
