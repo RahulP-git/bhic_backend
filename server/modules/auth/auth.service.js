@@ -22,6 +22,7 @@ import {
   revokeSession,
   rotateSession,
 } from "../../models/sessions.model.js";
+import { countGroups } from "../../models/groups.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
 
 const log = (message, meta = {}) => {
@@ -34,15 +35,18 @@ const getUserForLogin = async (managerName, mobileNumber) => {
   return createUser({ managerName, mobileNumber });
 };
 
-const profileState = (user) => {
-  const onboardingCompleted = Boolean(user.email && user.emailVerifiedAt && user.address);
+const profileState = async (user) => {
+  const groupCount = await countGroups(user._id, {});
+  const emailVerified = Boolean(user.email && user.emailVerifiedAt);
+  const onboardingCompleted = emailVerified && groupCount > 0;
   return {
     onboardingCompleted,
-    nextStep: onboardingCompleted ? "HOME" : user.email && !user.emailVerifiedAt ? "EMAIL_OTP" : user.email ? "ADDRESS" : "EMAIL",
+    hasGroups: groupCount > 0,
+    nextStep: !user.email ? "EMAIL" : !user.emailVerifiedAt ? "EMAIL_OTP" : groupCount > 0 ? "HOME" : "CREATE_GROUP",
   };
 };
 
-const publicUser = (user) => ({
+export const publicUser = async (user) => ({
   id: user._id.toString(),
   managerName: user.managerName,
   fullName: user.managerName,
@@ -50,14 +54,19 @@ const publicUser = (user) => ({
   email: user.email || null,
   emailVerifiedAt: user.emailVerifiedAt || null,
   address: user.address || null,
+  mobileVerifiedAt: user.mobileVerifiedAt || null,
   role: user.role,
   status: user.status,
-  ...profileState(user),
+  preferences: user.preferences || {},
+  createdAt: user.createdAt || null,
+  updatedAt: user.updatedAt || null,
+  ...(await profileState(user)),
 });
 
 export const requestOtp = async ({ managerName, fullName, mobileNumber, deviceId, requestId }) => {
-  const normalizedName = requireString(managerName ?? fullName, "fullName", { min: 2, max: 100 });
   const normalizedMobile = normalizeMobileNumber(mobileNumber);
+  const existingUser = await findUserByMobile(normalizedMobile);
+  const normalizedName = requireString(managerName ?? fullName ?? existingUser?.managerName, "fullName", { min: 2, max: 100 });
   const normalizedDeviceId = deviceId
     ? requireString(deviceId, "deviceId", { min: 1, max: 255 })
     : undefined;
@@ -142,7 +151,7 @@ export const verifyOtp = async ({ challengeId, otp, deviceId, requestId }) => {
     accessToken,
     refreshToken,
     expiresIn: Math.floor(env.accessTokenTtlMs / 1000),
-    user: publicUser(updatedUser),
+    user: await publicUser(updatedUser),
   };
 };
 
@@ -190,7 +199,7 @@ export const verifyEmailOtp = async ({ userId, challengeId, otp }) => {
   const now = new Date();
   await updateChallenge(normalizedChallengeId, { consumedAt: now, verifiedAt: now });
   const user = await updateUserProfile(userId, { email: challenge.email, emailVerifiedAt: now });
-  return { user: publicUser(user) };
+  return { user: await publicUser(user) };
 };
 
 export const refreshSession = async (refreshToken, requestId) => {
@@ -221,7 +230,7 @@ export const refreshSession = async (refreshToken, requestId) => {
     accessToken,
     refreshToken: nextRefreshToken,
     expiresIn: Math.floor(env.accessTokenTtlMs / 1000),
-    user: publicUser(await findUserById(session.userId)),
+    user: await publicUser(await findUserById(session.userId)),
     requestId,
   };
 };
