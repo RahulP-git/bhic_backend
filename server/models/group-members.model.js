@@ -6,6 +6,19 @@ export const findMember = (id, groupId) => collection().findOne({ _id: id, group
 // The group owner is also the first BHIC member. Keep that ordering stable for
 // every endpoint that reads members (including cycle creation).
 export const listMembers = (groupId, filter, skip, limit) => collection().find({ groupId, ...filter }).sort({ memberOrder: 1, createdAt: 1 }).skip(skip).limit(limit).toArray();
+export const listMemberPreviews = (groupId, filter, skip, limit) => collection()
+  .find({ groupId, ...filter }, {
+    projection: {
+      fullName: 1,
+      membershipStatus: 1,
+      memberOrder: 1,
+      photoUrl: 1,
+    },
+  })
+  .sort({ memberOrder: 1, createdAt: 1 })
+  .skip(skip)
+  .limit(limit)
+  .toArray();
 export const countMembers = (groupId, filter) => collection().countDocuments({ groupId, ...filter });
 export const countActiveMembers = (groupId) => collection().countDocuments({ groupId, membershipStatus: "ACTIVE" });
 export const updateMember = (id, updates) => collection().findOneAndUpdate({ _id: id }, { $set: { ...updates, updatedAt: new Date() } }, { returnDocument: "after" });

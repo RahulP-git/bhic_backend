@@ -4,8 +4,8 @@ import { normalizeMobileNumber, optionalString, requireString } from "../../comm
 import { getDatabase } from "../../db/mongo.js";
 import { createWhatsAppMessage } from "../../models/whatsapp-messages.model.js";
 import { createNotification, countNotifications, listNotifications, markAllNotificationsRead, markNotificationRead } from "../../models/notifications.model.js";
-import { countActiveMembers, countMembers, createMember, findMember, listMembers, updateMember } from "../../models/group-members.model.js";
-import { countGroups, createGroup, findGroup, findGroupById, listGroups, updateGroup } from "../../models/groups.model.js";
+import { countActiveMembers, countMembers, createMember, findMember, listMemberPreviews, listMembers, updateMember } from "../../models/group-members.model.js";
+import { createGroup, findGroup, findGroupById, listGroups, updateGroup } from "../../models/groups.model.js";
 import { createCycles, findCycle, listCycles, updateCycle } from "../../models/cycles.model.js";
 import { createParticipants, findParticipant, listParticipants, updateParticipant } from "../../models/cycle-participants.model.js";
 import { createCollection, correctCollection, findCollection, listCollections } from "../../models/cash-collections.model.js";
@@ -233,36 +233,28 @@ export const getGroups = async (userId, query) => {
   const pageNumber = page(query.page, 1, 1000000);
   const filter = query.status ? { status: query.status } : {};
   if (query.search) filter.name = { $regex: String(query.search).trim(), $options: "i" };
-  const [items, total] = await Promise.all([listGroups(userId, filter, (pageNumber - 1) * limit, limit), countGroups(userId, filter)]);
+  const items = await listGroups(userId, filter, (pageNumber - 1) * limit, limit);
   const summaries = await Promise.all(items.map(async (group) => {
-    const [activeMemberCount, cycles] = await Promise.all([
+    const [memberCount, activeMemberCount, cycles] = await Promise.all([
+      countMembers(group._id, { membershipStatus: { $ne: "REMOVED" } }),
       countActiveMembers(group._id),
       listCycles(group._id),
     ]);
     const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1] || null;
-    const completedCycleCount = cycles.filter((cycle) => cycle.status === "COMPLETED").length;
     return {
       groupId: group._id,
-      groupName: group.name,
-      status: group.status,
-      totalMembers: group.memberLimit,
-      activeMembers: activeMemberCount,
+      name: group.name,
+      memberCount,
+      activeMemberCount,
       contributionAmount: group.contributionAmount,
-      totalFund: group.totalBhicAmount,
-      currentBhishiNumber: currentCycle?.bhicNumber || 0,
+      totalBhicAmount: group.totalBhicAmount,
       currentCycleId: currentCycle?._id || null,
+      currentCycleNumber: currentCycle?.bhicNumber || null,
       currentCycleStatus: currentCycle?.status || null,
       nextScheduledDateTime: currentCycle?.scheduledStart || null,
-      completedCycleCount,
-      progress: {
-        completed: completedCycleCount,
-        total: group.memberLimit,
-        percentage: group.memberLimit ? Math.round((completedCycleCount / group.memberLimit) * 100) : 0,
-      },
-      group,
     };
   }));
-  return { items: toPublic(summaries), total, page: pageNumber, pageSize: limit, hasNextPage: pageNumber * limit < total };
+  return { hasGroups: summaries.length > 0, groups: toPublic(summaries) };
 };
 
 export const getGroup = async (groupId, userId) => toPublic(await ensureGroup(groupId, userId));
@@ -972,61 +964,73 @@ export const completeBhicCycle = async (cycleId, userId, requestId) => {
 };
 
 export const getGroupDashboard = async (groupId, userId) => {
-  const group = await ensureGroup(groupId, userId);
-  const [memberCount, members, cycles, notifications] = await Promise.all([
+  const group = await findGroup(toObjectId(groupId, "groupId"), userId);
+  if (!group) throw new AppError("NOT_FOUND", "Group not found", 404);
+  const [memberCount, members, cycles] = await Promise.all([
     countActiveMembers(group._id),
-    listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit),
+    listMemberPreviews(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit),
     listCycles(group._id),
-    listNotifications(userId, 0, 5),
   ]);
   const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1];
   const participants = currentCycle ? await listParticipants(currentCycle._id) : [];
   const winners = await listWinners(group._id);
   const winnerMemberIds = winners.map((winner) => winner.memberId).filter(Boolean);
-  const winnerMembers = winnerMemberIds.length ? await getDatabase().collection("group_members").find({ _id: { $in: winnerMemberIds } }).toArray() : [];
+  const winnerMembers = winnerMemberIds.length
+    ? await getDatabase().collection("group_members").find(
+      { _id: { $in: winnerMemberIds } },
+      { projection: { fullName: 1 } },
+    ).toArray()
+    : [];
   const winnerNames = new Map(winnerMembers.map((member) => [member._id.toString(), member.fullName]));
-  const winnerHistory = winners.map((winner) => ({ ...winner, memberName: winnerNames.get(winner.memberId.toString()) || null }));
+  const cycleNumbers = new Map(cycles.map((cycle) => [cycle._id.toString(), cycle.bhicNumber]));
+  const winnerHistory = winners.map((winner) => ({
+    winnerId: winner._id,
+    memberId: winner.memberId,
+    memberName: winnerNames.get(winner.memberId.toString()) || null,
+    bhishiNumber: cycleNumbers.get(winner.cycleId?.toString()) || null,
+    winnerAmount: winner.winnerPayoutAmount ?? winner.winnerBidAmount ?? 0,
+    cycleId: winner.cycleId,
+    selectedAt: winner.selectedAt,
+  }));
   const paidMemberCount = participants.filter((item) => item.collectionStatus === "PAID").length;
   const pendingMemberCount = participants.filter((item) => ["UNPAID", "PARTIAL"].includes(item.collectionStatus)).length;
-  const loggedInMember = members.find((member) => member.isManager) || members[0] || null;
-  const managerFirstName = loggedInMember?.fullName?.trim().split(/\s+/)[0] || null;
+  const memberStatus = new Map(participants.map((item) => [item.memberId.toString(), item.collectionStatus]));
+  const memberPreview = members.map((member) => {
+    const fullName = member.fullName || "";
+    const initials = fullName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("");
+    return {
+      memberId: member._id,
+      fullName,
+      initials,
+      ...(member.photoUrl ? { photoUrl: member.photoUrl } : {}),
+      status: member.membershipStatus,
+      collectionStatus: memberStatus.get(member._id.toString()) || null,
+    };
+  });
   return toPublic({
-    groupId: group._id,
-    groupName: group.name,
-    totalFund: group.totalBhicAmount,
-    totalCollected: currentCycle?.totalCollected || 0,
-    totalOutstanding: currentCycle?.totalOutstanding || 0,
-    paidMemberCount,
-    pendingMemberCount,
-    nextScheduledDateTime: currentCycle?.scheduledStart || null,
-    memberPreview: members,
-    winnerHistory,
-    group,
-    managerName: loggedInMember?.fullName || null,
-    managerFirstName,
-    loggedInMember,
-    totalMembers: memberCount,
-    memberCount,
-    members,
-    startedDate: group.startDate,
-    nextDate: currentCycle?.scheduledStart || null,
-    currentBhicNumber: currentCycle?.bhicNumber || 0,
-    currentCycle: currentCycle ? {
+    group: {
+      groupId: group._id,
+      name: group.name,
+      frequency: group.cyclePeriod,
+      contributionAmount: group.contributionAmount,
+      memberLimit: group.memberLimit,
+    },
+    summary: {
+      totalFund: group.totalBhicAmount,
+      totalCollected: currentCycle?.totalCollected || 0,
+      totalOutstanding: currentCycle?.totalOutstanding || 0,
+      totalMembers: memberCount,
+      paidMemberCount,
+      pendingMemberCount,
+    },
+    cycle: currentCycle ? {
       cycleId: currentCycle._id,
-      cycleNumber: currentCycle.bhicNumber,
-      groupId: currentCycle.groupId,
       bhicNumber: currentCycle.bhicNumber,
       status: currentCycle.status,
-      startAt: currentCycle.scheduledStart,
-      scheduledStart: currentCycle.scheduledStart,
-      actualStart: currentCycle.actualStart,
-      totalCollected: currentCycle.totalCollected,
-      totalOutstanding: currentCycle.totalOutstanding,
-      winnerId: currentCycle.winnerId,
-      currentCycleId: currentCycle._id,
-      currentCycleStatus: currentCycle.status,
+      nextScheduledDateTime: currentCycle.scheduledStart,
     } : null,
-    recentNotifications: notifications,
+    memberPreview,
+    winnerHistory,
   });
 };
 
