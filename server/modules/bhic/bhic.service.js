@@ -152,6 +152,9 @@ const validateGroupInput = (body) => {
   }
   const cycleIntervalDays = defaultIntervalDays;
   const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
+  const controlledAmount = body.controlledAmount === undefined || body.controlledAmount === null
+    ? 0
+    : moneyToRupees(body.controlledAmount, "controlledAmount");
   const memberLimit = body.memberLimit === undefined || body.memberLimit === null ? 1 : Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
     throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
@@ -159,7 +162,7 @@ const validateGroupInput = (body) => {
   const totalBhicAmount = contributionAmount * memberLimit;
   if (contributionAmount <= 0 || totalBhicAmount <= 0) throw new AppError("VALIDATION_ERROR", "Financial amounts must be greater than zero", 400);
   const rules = body.rules && typeof body.rules === "object" && !Array.isArray(body.rules) ? body.rules : {};
-  return { name, description: optionalString(body.description, "description", { max: 1000 }), startDate, startTime, timezone, cyclePeriod, cycleIntervalDays, contributionAmount, totalBhicAmount, memberLimit, rules };
+  return { name, description: optionalString(body.description, "description", { max: 1000 }), startDate, startTime, timezone, cyclePeriod, cycleIntervalDays, contributionAmount, controlledAmount, totalBhicAmount, memberLimit, rules };
 };
 
 const buildCycles = (groupId, input, count, startNumber = 1) => {
@@ -273,6 +276,7 @@ export const getGroups = async (userId, query) => {
       memberCount,
       activeMemberCount,
       contributionAmount: group.contributionAmount,
+      controlledAmount: group.controlledAmount || 0,
       totalBhicAmount: group.totalBhicAmount,
       currentCycleId: currentCycle?._id || null,
       currentCycleNumber: currentCycle?.bhicNumber || null,
@@ -998,6 +1002,9 @@ export const getGroupDashboard = async (groupId, userId) => {
     listCycles(group._id),
   ]);
   const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1];
+  const nextCycle = currentCycle
+    ? cycles.find((cycle) => cycle.bhicNumber > currentCycle.bhicNumber && !["COMPLETED", "CANCELLED"].includes(cycle.status)) || null
+    : null;
   const participants = currentCycle ? await listParticipants(currentCycle._id) : [];
   const winners = await listWinners(group._id);
   const winnerMemberIds = winners.map((winner) => winner.memberId).filter(Boolean);
@@ -1034,6 +1041,7 @@ export const getGroupDashboard = async (groupId, userId) => {
       memberId: member._id,
       fullName,
       initials,
+      mobileNumber: member.primaryContactNumber || null,
       ...(member.photoUrl ? { photoUrl: member.photoUrl } : {}),
       status: member.membershipStatus,
       collectionStatus: memberStatus.get(member._id.toString()) || null,
@@ -1045,6 +1053,7 @@ export const getGroupDashboard = async (groupId, userId) => {
       name: group.name,
       frequency: group.cyclePeriod,
       contributionAmount: group.contributionAmount,
+      controlledAmount: group.controlledAmount || 0,
       memberLimit: group.memberLimit,
     },
     summary: {
@@ -1062,6 +1071,16 @@ export const getGroupDashboard = async (groupId, userId) => {
       nextScheduledDateTime: currentCycle.scheduledStart,
     } : null,
     scheduledStart: currentCycle?.scheduledStart || null,
+    currentCycleNumber: currentCycle?.bhicNumber || null,
+    nextCycleNumber: nextCycle?.bhicNumber || null,
+    nextScheduledDateTime: nextCycle?.scheduledStart || currentCycle?.scheduledStart || null,
+    nextCycle: nextCycle ? {
+      cycleId: nextCycle._id,
+      bhicNumber: nextCycle.bhicNumber,
+      status: nextCycle.status,
+      scheduledStart: nextCycle.scheduledStart,
+      nextScheduledDateTime: nextCycle.scheduledStart,
+    } : null,
     memberPreview,
     members: memberPreview,
     latestWinner,

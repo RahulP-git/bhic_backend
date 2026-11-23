@@ -10,6 +10,7 @@ export const listMemberPreviews = (groupId, filter, skip, limit) => collection()
   .find({ groupId, ...filter }, {
     projection: {
       fullName: 1,
+      primaryContactNumber: 1,
       membershipStatus: 1,
       memberOrder: 1,
       photoUrl: 1,
