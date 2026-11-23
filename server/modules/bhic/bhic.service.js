@@ -15,6 +15,7 @@ import { writeAuditLog } from "../../models/audit-logs.model.js";
 import { findUserById } from "../../models/users.model.js";
 
 const now = () => new Date();
+const dateOnlyInTimezone = (date, timezone = "Asia/Kolkata") => new Date(date).toLocaleDateString("en-CA", { timeZone: timezone });
 const page = (value, fallback, max) => Math.min(Math.max(Number(value) || fallback, 1), max);
 const toPublic = (value) => serialize(value);
 
@@ -993,7 +994,7 @@ export const getGroupDashboard = async (groupId, userId) => {
   if (!group) throw new AppError("NOT_FOUND", "Group not found", 404);
   const [memberCount, members, cycles] = await Promise.all([
     countActiveMembers(group._id),
-    listMemberPreviews(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit),
+    listMemberPreviews(group._id, { membershipStatus: "ACTIVE" }, 0, Math.min(group.memberLimit, 5)),
     listCycles(group._id),
   ]);
   const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status)) || cycles[cycles.length - 1];
@@ -1017,6 +1018,12 @@ export const getGroupDashboard = async (groupId, userId) => {
     cycleId: winner.cycleId,
     selectedAt: winner.selectedAt,
   }));
+  const latestWinnerRecord = winners[0] || null;
+  const latestWinner = latestWinnerRecord ? {
+    name: winnerNames.get(latestWinnerRecord.memberId.toString()) || null,
+    amount: latestWinnerRecord.winnerPayoutAmount ?? latestWinnerRecord.winnerBidAmount ?? 0,
+    date: latestWinnerRecord.selectedAt ? dateOnlyInTimezone(latestWinnerRecord.selectedAt, group.timezone || "Asia/Kolkata") : null,
+  } : null;
   const paidMemberCount = participants.filter((item) => item.collectionStatus === "PAID").length;
   const pendingMemberCount = participants.filter((item) => ["UNPAID", "PARTIAL"].includes(item.collectionStatus)).length;
   const memberStatus = new Map(participants.map((item) => [item.memberId.toString(), item.collectionStatus]));
@@ -1054,7 +1061,10 @@ export const getGroupDashboard = async (groupId, userId) => {
       status: currentCycle.status,
       nextScheduledDateTime: currentCycle.scheduledStart,
     } : null,
+    scheduledStart: currentCycle?.scheduledStart || null,
     memberPreview,
+    members: memberPreview,
+    latestWinner,
     winnerHistory,
   });
 };
