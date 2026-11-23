@@ -294,6 +294,7 @@ export const updateBhicGroup = async (groupId, body, userId, requestId) => {
   if (["CLOSED"].includes(group.status)) throw new AppError("INVALID_STATE", "Closed groups cannot be updated", 409);
   const updates = {};
   for (const field of ["name", "description", "startTime", "timezone"]) if (body[field] !== undefined) updates[field] = requireString(body[field], field, { min: 1, max: field === "description" ? 1000 : 150 });
+  if (body.controlledAmount !== undefined) updates.controlledAmount = moneyToRupees(body.controlledAmount, "controlledAmount");
   if (body.rules !== undefined) {
     if (!body.rules || typeof body.rules !== "object" || Array.isArray(body.rules)) throw new AppError("VALIDATION_ERROR", "rules must be an object", 400);
     updates.activeRuleVersion = (group.activeRuleVersion || 1) + 1;
