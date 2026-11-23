@@ -111,19 +111,45 @@ const addDays = (date, days) => {
   return result;
 };
 
+const normalizeTimeDigits = (value) => String(value)
+  .replace(/[०-९]/g, (digit) => String(digit.charCodeAt(0) - "०".charCodeAt(0)))
+  .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - "٠".charCodeAt(0)));
+
+const normalizeStartTime = (value) => {
+  const input = normalizeTimeDigits(requireString(value, "startTime", { min: 4, max: 12 })).trim().toUpperCase();
+  const meridianMatch = input.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+  if (meridianMatch) {
+    let hours = Number(meridianMatch[1]);
+    const minutes = Number(meridianMatch[2]);
+    if (hours < 1 || hours > 12 || minutes > 59) throw new AppError("VALIDATION_ERROR", "startTime must be a valid time", 400);
+    if (meridianMatch[3] === "AM" && hours === 12) hours = 0;
+    if (meridianMatch[3] === "PM" && hours !== 12) hours += 12;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  const twentyFourHourMatch = input.match(/^(\d{2}):(\d{2})$/);
+  if (!twentyFourHourMatch) throw new AppError("VALIDATION_ERROR", "startTime must use HH:mm or h:mm AM/PM", 400);
+  const hours = Number(twentyFourHourMatch[1]);
+  const minutes = Number(twentyFourHourMatch[2]);
+  if (hours > 23 || minutes > 59) throw new AppError("VALIDATION_ERROR", "startTime must be a valid time", 400);
+  return input;
+};
+
 const validateGroupInput = (body) => {
   const name = requireString(body.name, "name", { min: 2, max: 150 });
   const startDate = requireString(body.startDate, "startDate", { min: 10, max: 10 });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw new AppError("VALIDATION_ERROR", "startDate must use YYYY-MM-DD", 400);
-  const startTime = requireString(body.startTime, "startTime", { min: 5, max: 5 });
-  if (!/^\d{2}:\d{2}$/.test(startTime)) throw new AppError("VALIDATION_ERROR", "startTime must use HH:mm", 400);
+  const startTime = normalizeStartTime(body.startTime);
   const timezone = requireString(body.timezone || "Asia/Kolkata", "timezone", { min: 3, max: 100 });
   const cyclePeriod = body.cyclePeriod || body.frequency || "MONTHLY";
-  if (!["MONTHLY", "WEEKLY", "EVERY_15_DAYS"].includes(cyclePeriod)) throw new AppError("VALIDATION_ERROR", "cyclePeriod must be MONTHLY, WEEKLY, or EVERY_15_DAYS", 400);
-  const cycleIntervalDays = body.cycleIntervalDays === undefined || body.cycleIntervalDays === null ? null : Number(body.cycleIntervalDays);
-  if (cyclePeriod === "EVERY_15_DAYS" && (!Number.isInteger(cycleIntervalDays) || cycleIntervalDays < 1)) {
-    throw new AppError("VALIDATION_ERROR", "cycleIntervalDays must be a positive integer for EVERY_15_DAYS", 400);
+  const supportedPeriods = ["DAILY", "EVERY_10_DAYS", "EVERY_15_DAYS", "MONTHLY", "WEEKLY"];
+  if (!supportedPeriods.includes(cyclePeriod)) throw new AppError("VALIDATION_ERROR", "cyclePeriod must be DAILY, EVERY_10_DAYS, EVERY_15_DAYS, or MONTHLY", 400);
+  const defaultIntervalDays = { DAILY: 1, EVERY_10_DAYS: 10, EVERY_15_DAYS: 15, WEEKLY: 7 }[cyclePeriod] || null;
+  const requestedIntervalDays = body.cycleIntervalDays === undefined || body.cycleIntervalDays === null ? defaultIntervalDays : Number(body.cycleIntervalDays);
+  if (defaultIntervalDays && (!Number.isInteger(requestedIntervalDays) || requestedIntervalDays !== defaultIntervalDays)) {
+    throw new AppError("VALIDATION_ERROR", `${cyclePeriod} must use a ${defaultIntervalDays}-day interval`, 400);
   }
+  const cycleIntervalDays = defaultIntervalDays;
   const contributionAmount = moneyToRupees(body.contributionAmount, "contributionAmount");
   const memberLimit = body.memberLimit === undefined || body.memberLimit === null ? 1 : Number(body.memberLimit);
   if (!Number.isInteger(memberLimit) || memberLimit < 1 || memberLimit > 1000) {
@@ -138,11 +164,10 @@ const validateGroupInput = (body) => {
 const buildCycles = (groupId, input, count, startNumber = 1) => {
   const first = scheduledDate(input.startDate, input.startTime, input.timezone);
   return Array.from({ length: count }, (_, index) => {
-    const scheduledStart = input.cyclePeriod === "EVERY_15_DAYS"
-      ? addDays(first, input.cycleIntervalDays * index)
-      : input.cyclePeriod === "WEEKLY"
-        ? addDays(first, 7 * index)
-      : addMonths(first, index + startNumber - 1);
+    const cycleOffset = index + startNumber - 1;
+    const scheduledStart = input.cyclePeriod === "MONTHLY"
+      ? addMonths(first, cycleOffset)
+      : addDays(first, input.cycleIntervalDays * cycleOffset);
     return {
       groupId,
       bhicNumber: startNumber + index,
