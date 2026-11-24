@@ -446,6 +446,16 @@ GET   /api/v1/groups/{groupId}/dashboard
 POST  /api/v1/groups/{groupId}/close
 ```
 
+To edit the declared member count, send `memberLimit` in the same PATCH request:
+
+```json
+{
+  "memberLimit": 12
+}
+```
+
+The backend recalculates `totalBhicAmount`, updates scheduled cycle totals, and creates or cancels scheduled cycles to match the new count. The new count cannot be lower than the current active member count, and member-count changes are blocked after a cycle has started. After increasing the count, add members through `POST /api/v1/groups/{groupId}/members` until `memberLimit` is reached. Removing a member continues to use `POST /api/v1/groups/{groupId}/members/{memberId}/remove`.
+
 Use `GET /api/v1/groups/{groupId}/details` when the dashboard Bhishi group card is tapped. It returns the Bhishi name/number, start date, next date-time, countdown seconds, total and contributed amounts, member counts, add-member availability, and the complete active member list. `canAddMembers` must be checked before showing the add-member action; the add-member API also enforces the same limit.
 
 Current limitation: the group details model contains static sample members and static dates. These must be replaced with API response models.

@@ -343,6 +343,58 @@ export const updateBhicGroup = async (groupId, body, userId, requestId) => {
   const updates = {};
   for (const field of ["name", "description", "startTime", "timezone"]) if (body[field] !== undefined) updates[field] = requireString(body[field], field, { min: 1, max: field === "description" ? 1000 : 150 });
   if (body.controlledAmount !== undefined) updates.controlledAmount = moneyToRupees(body.controlledAmount, "controlledAmount");
+  let requestedMemberLimit;
+  if (body.memberLimit !== undefined) {
+    requestedMemberLimit = Number(body.memberLimit);
+    if (!Number.isInteger(requestedMemberLimit) || requestedMemberLimit < 1 || requestedMemberLimit > 1000) {
+      throw new AppError("VALIDATION_ERROR", "memberLimit must be an integer between 1 and 1000", 400);
+    }
+    const activeMemberCount = await countActiveMembers(group._id);
+    if (requestedMemberLimit < activeMemberCount) {
+      throw new AppError("CONFLICT", `memberLimit cannot be less than the ${activeMemberCount} active group member(s)`, 409);
+    }
+    if (requestedMemberLimit !== group.memberLimit) {
+      const cycles = await listCycles(group._id);
+      const startedCycle = cycles.find((cycle) => cycle.status !== "SCHEDULED" && cycle.status !== "CANCELLED");
+      if (startedCycle) {
+        throw new AppError("INVALID_STATE", "Member count cannot be changed after a Bhishi cycle has started", 409);
+      }
+      const scheduledCycles = cycles.filter((cycle) => cycle.status === "SCHEDULED").sort((a, b) => a.bhicNumber - b.bhicNumber);
+      const cancelledCycles = cycles.filter((cycle) => cycle.status === "CANCELLED").sort((a, b) => a.bhicNumber - b.bhicNumber);
+      const expectedTotal = group.contributionAmount * requestedMemberLimit;
+
+      if (requestedMemberLimit < scheduledCycles.length) {
+        const cyclesToCancel = scheduledCycles.slice(requestedMemberLimit);
+        await getDatabase().collection("cycles").updateMany(
+          { _id: { $in: cyclesToCancel.map((cycle) => cycle._id) }, status: "SCHEDULED" },
+          { $set: { status: "CANCELLED", cancelledAt: now(), cancellationReason: "GROUP_MEMBER_LIMIT_REDUCED", updatedAt: now() } },
+        );
+      }
+
+      const retainedScheduledCount = Math.min(requestedMemberLimit, scheduledCycles.length);
+      const cyclesToReactivate = requestedMemberLimit > retainedScheduledCount
+        ? cancelledCycles.slice(0, requestedMemberLimit - retainedScheduledCount)
+        : [];
+      if (cyclesToReactivate.length) {
+        await getDatabase().collection("cycles").updateMany(
+          { _id: { $in: cyclesToReactivate.map((cycle) => cycle._id) }, status: "CANCELLED" },
+          { $set: { status: "SCHEDULED", expectedTotal, totalCollected: 0, totalOutstanding: expectedTotal, updatedAt: now() }, $unset: { cancelledAt: "", cancellationReason: "" } },
+        );
+      }
+
+      const activeScheduleCount = retainedScheduledCount + cyclesToReactivate.length;
+      if (requestedMemberLimit > activeScheduleCount) {
+        const maxCycleNumber = cycles.reduce((max, cycle) => Math.max(max, cycle.bhicNumber || 0), 0);
+        await createCycles(buildCycles(group._id, { ...group, memberLimit: requestedMemberLimit }, requestedMemberLimit - activeScheduleCount, maxCycleNumber + 1));
+      }
+      await getDatabase().collection("cycles").updateMany(
+        { groupId: group._id, status: "SCHEDULED" },
+        { $set: { expectedTotal, totalOutstanding: expectedTotal, updatedAt: now() } },
+      );
+      updates.memberLimit = requestedMemberLimit;
+      updates.totalBhicAmount = expectedTotal;
+    }
+  }
   if (body.rules !== undefined) {
     if (!body.rules || typeof body.rules !== "object" || Array.isArray(body.rules)) throw new AppError("VALIDATION_ERROR", "rules must be an object", 400);
     updates.activeRuleVersion = (group.activeRuleVersion || 1) + 1;
