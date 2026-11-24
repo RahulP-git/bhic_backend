@@ -440,10 +440,13 @@ Required APIs:
 
 ```http
 GET   /api/v1/groups/{groupId}
+GET   /api/v1/groups/{groupId}/details
 PATCH /api/v1/groups/{groupId}
 GET   /api/v1/groups/{groupId}/dashboard
 POST  /api/v1/groups/{groupId}/close
 ```
+
+Use `GET /api/v1/groups/{groupId}/details` when the dashboard Bhishi group card is tapped. It returns the Bhishi name/number, start date, next date-time, countdown seconds, total and contributed amounts, member counts, add-member availability, and the complete active member list. `canAddMembers` must be checked before showing the add-member action; the add-member API also enforces the same limit.
 
 Current limitation: the group details model contains static sample members and static dates. These must be replaced with API response models.
 

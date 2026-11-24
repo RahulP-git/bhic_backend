@@ -289,6 +289,54 @@ export const getGroups = async (userId, query) => {
 
 export const getGroup = async (groupId, userId) => toPublic(await ensureGroup(groupId, userId));
 
+export const getGroupDetails = async (groupId, userId) => {
+  const group = await ensureGroup(groupId, userId);
+  const [members, cycles] = await Promise.all([
+    listMembers(group._id, { membershipStatus: "ACTIVE" }, 0, group.memberLimit),
+    listCycles(group._id),
+  ]);
+  const currentCycle = cycles.find((cycle) => !["COMPLETED", "CANCELLED"].includes(cycle.status))
+    || cycles[cycles.length - 1]
+    || null;
+  const nextScheduledDateTime = currentCycle?.scheduledStart || null;
+  const nextScheduledAt = nextScheduledDateTime ? new Date(nextScheduledDateTime) : null;
+  const timeRemainingSeconds = nextScheduledAt
+    ? Math.max(0, Math.floor((nextScheduledAt.getTime() - Date.now()) / 1000))
+    : null;
+  const totalMembers = members.length;
+  const totalAmount = roundRupees(group.totalBhicAmount || group.contributionAmount * group.memberLimit);
+  const contributedAmount = roundRupees(currentCycle?.totalCollected || 0);
+
+  return toPublic({
+    groupId: group._id,
+    bhishiName: group.name,
+    bhishiNumber: currentCycle?.bhicNumber || group.currentCycleNumber || null,
+    startDate: group.startDate,
+    nextDateTime: nextScheduledDateTime,
+    timeRemainingSeconds,
+    totalAmount,
+    contributedAmount,
+    totalMembers,
+    declaredMemberCount: group.memberLimit,
+    remainingMemberSlots: Math.max(0, group.memberLimit - totalMembers),
+    canAddMembers: totalMembers < group.memberLimit,
+    contributionAmount: group.contributionAmount,
+    frequency: group.cyclePeriod,
+    timezone: group.timezone,
+    status: group.status,
+    cycle: currentCycle ? {
+      cycleId: currentCycle._id,
+      bhishiNumber: currentCycle.bhicNumber,
+      status: currentCycle.status,
+      scheduledStart: currentCycle.scheduledStart,
+      expectedAmount: roundRupees(currentCycle.expectedTotal || totalAmount),
+      collectedAmount: contributedAmount,
+      outstandingAmount: roundRupees(currentCycle.totalOutstanding || 0),
+    } : null,
+    members,
+  });
+};
+
 export const updateBhicGroup = async (groupId, body, userId, requestId) => {
   const group = await ensureGroup(groupId, userId);
   if (["CLOSED"].includes(group.status)) throw new AppError("INVALID_STATE", "Closed groups cannot be updated", 409);
