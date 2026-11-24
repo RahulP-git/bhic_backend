@@ -2,7 +2,7 @@ import { Router } from "express";
 import { asyncHandler, successResponse } from "../../common/http.js";
 import { AppError } from "../../common/errors.js";
 import { requireAuth } from "../../middleware/auth.js";
-import { logout, refreshSession, requestEmailOtp, requestOtp, verifyEmailOtp, verifyOtp } from "./auth.service.js";
+import { logout, refreshSession, requestEmailLoginOtp, requestEmailOtp, requestOtp, verifyEmailLoginOtp, verifyEmailOtp, verifyOtp } from "./auth.service.js";
 
 export const authRouter = Router();
 
@@ -13,6 +13,16 @@ authRouter.post("/login/request-otp", asyncHandler(async (req, res) => {
 
 authRouter.post("/login/verify-otp", asyncHandler(async (req, res) => {
   const data = await verifyOtp({ ...req.body, requestId: req.requestId });
+  successResponse(res, data);
+}));
+
+authRouter.post("/login/email/request-otp", asyncHandler(async (req, res) => {
+  const data = await requestEmailLoginOtp({ email: req.body?.email, deviceId: req.body?.deviceId, requestId: req.requestId });
+  successResponse(res, data, 201);
+}));
+
+authRouter.post("/login/email/verify-otp", asyncHandler(async (req, res) => {
+  const data = await verifyEmailLoginOtp({ challengeId: req.body?.challengeId, otp: req.body?.otp, deviceId: req.body?.deviceId, requestId: req.requestId });
   successResponse(res, data);
 }));
 

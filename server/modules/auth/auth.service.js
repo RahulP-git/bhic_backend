@@ -38,11 +38,12 @@ const getUserForLogin = async (managerName, mobileNumber) => {
 const profileState = async (user) => {
   const groupCount = await countGroups(user._id, {});
   const emailVerified = Boolean(user.email && user.emailVerifiedAt);
-  const onboardingCompleted = emailVerified && groupCount > 0;
+  const addressCompleted = Boolean(user.address);
+  const onboardingCompleted = emailVerified && addressCompleted;
   return {
     onboardingCompleted,
     hasGroups: groupCount > 0,
-    nextStep: !user.email ? "EMAIL" : !user.emailVerifiedAt ? "EMAIL_OTP" : groupCount > 0 ? "HOME" : "CREATE_GROUP",
+    nextStep: !user.email ? "EMAIL" : !user.emailVerifiedAt ? "EMAIL_OTP" : !addressCompleted ? "ADDRESS" : "HOME",
   };
 };
 
@@ -62,6 +63,30 @@ export const publicUser = async (user) => ({
   updatedAt: user.updatedAt || null,
   ...(await profileState(user)),
 });
+
+const createAuthenticatedSession = async (user, deviceId, requestId, action = "MANAGER_LOGIN") => {
+  const accessToken = randomToken();
+  const refreshToken = randomToken();
+  const now = new Date();
+  await createSession({
+    userId: user._id,
+    deviceId,
+    accessTokenHash: hashValue(accessToken),
+    refreshTokenHash: hashValue(refreshToken),
+    issuedAt: now,
+    expiresAt: new Date(now.getTime() + env.accessTokenTtlMs),
+    refreshExpiresAt: new Date(now.getTime() + env.refreshTokenTtlMs),
+    createdAt: now,
+  });
+  await writeAuditLog({ actorType: "MANAGER", actorId: user._id, action, entityType: "USER", entityId: user._id, requestId });
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn: Math.floor(env.accessTokenTtlMs / 1000),
+    expiresAt: new Date(now.getTime() + env.accessTokenTtlMs).toISOString(),
+    user: await publicUser(user),
+  };
+};
 
 export const requestOtp = async ({ managerName, fullName, mobileNumber, deviceId, requestId }) => {
   const normalizedMobile = normalizeMobileNumber(mobileNumber);
@@ -122,37 +147,11 @@ export const verifyOtp = async ({ challengeId, otp, deviceId, requestId }) => {
 
   const user = await getUserForLogin(challenge.managerName, challenge.mobileNumber);
   const updatedUser = await updateUserAfterLogin(user._id, challenge.managerName);
-  const accessToken = randomToken();
-  const refreshToken = randomToken();
   const now = new Date();
-
   await updateChallenge(normalizedChallengeId, { consumedAt: now, verifiedAt: now });
-  await createSession({
-    userId: updatedUser._id,
-    deviceId: deviceId || challenge.deviceId,
-    accessTokenHash: hashValue(accessToken),
-    refreshTokenHash: hashValue(refreshToken),
-    issuedAt: now,
-    expiresAt: new Date(now.getTime() + env.accessTokenTtlMs),
-    refreshExpiresAt: new Date(now.getTime() + env.refreshTokenTtlMs),
-    createdAt: now,
-  });
-  await writeAuditLog({
-    actorType: "MANAGER",
-    actorId: updatedUser._id,
-    action: "MANAGER_LOGIN",
-    entityType: "USER",
-    entityId: updatedUser._id,
-    requestId,
-  });
 
   log("LOGIN_SUCCESS", { userId: updatedUser._id.toString(), deviceId });
-  return {
-    accessToken,
-    refreshToken,
-    expiresIn: Math.floor(env.accessTokenTtlMs / 1000),
-    user: await publicUser(updatedUser),
-  };
+  return createAuthenticatedSession(updatedUser, deviceId || challenge.deviceId, requestId);
 };
 
 export const requestEmailOtp = async ({ userId, email, requestId }) => {
@@ -202,6 +201,49 @@ export const verifyEmailOtp = async ({ userId, challengeId, otp }) => {
   return { user: await publicUser(user) };
 };
 
+export const requestEmailLoginOtp = async ({ email, deviceId, requestId }) => {
+  const normalizedEmail = normalizeEmail(email);
+  const user = await findUserByEmail(normalizedEmail);
+  if (!user) throw new AppError("AUTH_REQUIRED", "No registered account found for this email", 401);
+  const challengeId = crypto.randomUUID();
+  const otp = env.debugOtpEnabled ? env.debugOtp : String(crypto.randomInt(100000, 1000000));
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + env.otpTtlMs);
+  await createChallenge({
+    challengeId,
+    type: "EMAIL_LOGIN",
+    userId: user._id,
+    email: normalizedEmail,
+    deviceId: deviceId || undefined,
+    otpHash: createOtpHash(otp),
+    attemptCount: 0,
+    expiresAt,
+    createdAt: now,
+    requestId,
+  });
+  if (env.debugOtpEnabled) console.log(`[EMAIL LOGIN OTP DEBUG] otp=${otp}`);
+  return { challengeId, expiresAt: expiresAt.toISOString(), ...(env.debugOtpEnabled ? { debugOtp: otp } : {}) };
+};
+
+export const verifyEmailLoginOtp = async ({ challengeId, otp, deviceId, requestId }) => {
+  const normalizedChallengeId = requireString(challengeId, "challengeId", { min: 10, max: 100 });
+  const normalizedOtp = requireString(otp, "otp", { min: 6, max: 6 });
+  if (!/^\d{6}$/.test(normalizedOtp)) throw new AppError("VALIDATION_ERROR", "otp must contain exactly 6 digits", 400);
+  const challenge = await findChallenge(normalizedChallengeId);
+  if (!challenge || challenge.type !== "EMAIL_LOGIN" || !challenge.userId) throw new AppError("AUTH_REQUIRED", "Email login OTP challenge is invalid", 401);
+  if (challenge.consumedAt) throw new AppError("AUTH_REQUIRED", "OTP challenge has already been used", 401);
+  if (challenge.expiresAt <= new Date()) throw new AppError("AUTH_EXPIRED", "OTP challenge has expired", 401);
+  if (challenge.attemptCount >= env.otpMaxAttempts) throw new AppError("RATE_LIMITED", "OTP attempt limit exceeded", 429);
+  if (hashValue(normalizedOtp) !== challenge.otpHash) {
+    await updateChallenge(normalizedChallengeId, { attemptCount: challenge.attemptCount + 1 });
+    throw new AppError("AUTH_REQUIRED", "OTP is invalid", 401);
+  }
+  await updateChallenge(normalizedChallengeId, { consumedAt: new Date(), verifiedAt: new Date() });
+  const user = await findUserById(challenge.userId);
+  if (!user || user.status !== "ACTIVE" || user.role !== "MANAGER") throw new AppError("FORBIDDEN", "Manager access is required", 403);
+  return createAuthenticatedSession(user, deviceId || challenge.deviceId, requestId, "MANAGER_EMAIL_LOGIN");
+};
+
 export const refreshSession = async (refreshToken, requestId) => {
   const hashedToken = hashValue(refreshToken);
   log("REFRESH_ATTEMPT", { requestId, tokenPrefix: hashedToken.substring(0, 16) });
@@ -230,6 +272,7 @@ export const refreshSession = async (refreshToken, requestId) => {
     accessToken,
     refreshToken: nextRefreshToken,
     expiresIn: Math.floor(env.accessTokenTtlMs / 1000),
+    expiresAt: new Date(now.getTime() + env.accessTokenTtlMs).toISOString(),
     user: await publicUser(await findUserById(session.userId)),
     requestId,
   };
