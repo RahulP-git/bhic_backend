@@ -14,7 +14,7 @@ export const env = {
   databaseName: process.env.MONGODB_DB_NAME || "bhic",
   mongodbUri: process.env.MONGODB_URI,
   accessTokenTtlMs: toPositiveInteger(process.env.ACCESS_TOKEN_TTL_MS, 15 * 60 * 1000),
-  refreshTokenTtlMs: toPositiveInteger(process.env.REFRESH_TOKEN_TTL_MS, oneYearMs),
+  refreshTokenTtlMs: Math.max(toPositiveInteger(process.env.REFRESH_TOKEN_TTL_MS, oneYearMs), oneYearMs),
   otpTtlMs: toPositiveInteger(process.env.OTP_TTL_MS, 5 * 60 * 1000),
   otpMaxAttempts: toPositiveInteger(process.env.OTP_MAX_ATTEMPTS, 5),
   debugOtp: process.env.DEBUG_OTP || "123456",
