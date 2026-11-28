@@ -21,6 +21,10 @@ export const env = {
   debugOtpEnabled: process.env.AUTH_DEBUG_OTP === "true",
   paymentDebugMode: process.env.PAYMENT_DEBUG_MODE === "true" && process.env.NODE_ENV !== "production",
   nodeEnv: process.env.NODE_ENV || "development",
+  schedulerEnabled: process.env.SCHEDULER_ENABLED !== "false",
+  schedulerCron: process.env.SCHEDULER_CRON || "*/5 * * * *",
+  fcmEnabled: process.env.FCM_ENABLED === "true",
+  fcmProjectId: process.env.FCM_PROJECT_ID || null,
 };
 
 if (!env.mongodbUri) {

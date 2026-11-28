@@ -13,6 +13,7 @@ import { correctWinner, createWinner, findWinner, hasMemberWon, listWinners } fr
 import { createDistribution, createDistributionItems, findDistribution, listDistributionItems, updateDistribution } from "../../models/distributions.model.js";
 import { writeAuditLog } from "../../models/audit-logs.model.js";
 import { findUserById } from "../../models/users.model.js";
+import { notifyManagerAndQueueMemberWhatsApp } from "../notifications/notification.service.js";
 
 const now = () => new Date();
 const dateOnlyInTimezone = (date, timezone = "Asia/Kolkata") => new Date(date).toLocaleDateString("en-CA", { timeZone: timezone });
@@ -698,6 +699,27 @@ export const saveWinner = async (cycleId, body, userId, requestId) => {
   const winner = { cycleId: cycle._id, groupId: cycle.groupId, memberId: winnerMemberId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, selectedBy: userId, selectedAt: now(), note: optionalString(body.note, "note", { max: 1000 }), status: "SELECTED", createdAt: now() };
   const result = await createWinner(winner);
   await updateCycle(cycle._id, { winnerId: result.insertedId, winnerBidAmount, winnerPayoutAmount, remainingAmount: winnerBidAmount, status: "DISTRIBUTION_PENDING" });
+  const winnerMember = eligible.find((member) => member._id.toString() === winnerMemberId.toString());
+  const group = await findGroupById(cycle.groupId);
+  await notifyManagerAndQueueMemberWhatsApp({
+    managerUserId: userId,
+    groupId: cycle.groupId,
+    cycleId: cycle._id,
+    type: "WINNER_ANNOUNCED",
+    title: "Winner announced",
+    body: `${winnerMember?.fullName || "A member"} won Bhishi ${cycle.bhicNumber}`,
+    templateId: "winner-announcement",
+    dedupeKey: `WINNER_ANNOUNCED:${cycle._id.toString()}`,
+    content: {
+      groupName: group?.name || null,
+      bhishiNumber: cycle.bhicNumber,
+      winnerName: winnerMember?.fullName || null,
+      winnerAmount: winnerPayoutAmount,
+      winnerBidAmount,
+      selectedAt: winner.selectedAt,
+    },
+    createdBy: userId,
+  });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "WINNER_SELECTED", entityType: "WINNER", entityId: result.insertedId, requestId });
   return toPublic({ ...winner, _id: result.insertedId });
 };
@@ -783,7 +805,25 @@ export const completionDecision = async (cycleId, body, userId, requestId) => {
     undistributedAmount: winner.winnerBidAmount,
     carryForwardAmount,
   });
-  await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `Distribution for BHIC ${cycle.bhicNumber} was published`, createdAt: now() });
+  const completedWinner = await findMember(winner.memberId, cycle.groupId);
+  await notifyManagerAndQueueMemberWhatsApp({
+    managerUserId: userId,
+    groupId: cycle.groupId,
+    cycleId: cycle._id,
+    type: "CYCLE_COMPLETED",
+    title: "Bhishi completed",
+    body: `Bhishi ${cycle.bhicNumber} in ${group.name} has been completed`,
+    templateId: "cycle-completed",
+    dedupeKey: `CYCLE_COMPLETED:${cycle._id.toString()}`,
+    content: {
+      groupName: group.name,
+      bhishiNumber: cycle.bhicNumber,
+      winnerName: completedWinner?.fullName || null,
+      winnerAmount: winner.winnerPayoutAmount,
+      completedAt: cycle.completedAt || new Date(),
+    },
+    createdBy: userId,
+  });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
 
   // Determine if previous cycle has a published distribution with interest
@@ -1089,7 +1129,26 @@ export const completeBhicCycle = async (cycleId, userId, requestId) => {
     { $set: { allocationStatus: "ALLOCATED", updatedAt: now() }, $addToSet: { wonCycleIds: cycle._id } },
   );
   const updated = await updateCycle(cycle._id, { status: "COMPLETED", completedAt: now() });
-  await createNotification({ recipientUserId: userId, groupId: cycle.groupId, cycleId: cycle._id, type: "CYCLE_COMPLETED", title: "Cycle completed", body: `BHIC ${cycle.bhicNumber} has been completed`, createdAt: now() });
+  const completedGroup = await findGroupById(cycle.groupId);
+  const completedWinner = await findMember(winner.memberId, cycle.groupId);
+  await notifyManagerAndQueueMemberWhatsApp({
+    managerUserId: userId,
+    groupId: cycle.groupId,
+    cycleId: cycle._id,
+    type: "CYCLE_COMPLETED",
+    title: "Bhishi completed",
+    body: `Bhishi ${cycle.bhicNumber} in ${completedGroup?.name || "your group"} has been completed`,
+    templateId: "cycle-completed",
+    dedupeKey: `CYCLE_COMPLETED:${cycle._id.toString()}`,
+    content: {
+      groupName: completedGroup?.name || null,
+      bhishiNumber: cycle.bhicNumber,
+      winnerName: completedWinner?.fullName || null,
+      winnerAmount: winner.winnerPayoutAmount,
+      completedAt: updated.value?.completedAt || updated.completedAt || new Date(),
+    },
+    createdBy: userId,
+  });
   await writeAuditLog({ actorType: "MANAGER", actorId: userId, action: "CYCLE_COMPLETED", entityType: "CYCLE", entityId: cycle._id, requestId });
   return toPublic(updated.value || updated);
 };

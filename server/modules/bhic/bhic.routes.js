@@ -90,7 +90,7 @@ bhicRouter.post("/notifications/read-all", asyncHandler(async (req, res) => succ
 bhicRouter.post("/notifications/devices", asyncHandler(async (req, res) => {
   const { pushProvider, token, platform, appVersion } = req.body || {};
   if (!pushProvider || !token || !platform) throw new AppError("VALIDATION_ERROR", "pushProvider, token, and platform are required", 400);
-  const device = { userId: req.auth.user._id, pushProvider, token, platform, appVersion: appVersion || null, lastSeenAt: new Date(), updatedAt: new Date() };
+  const device = { userId: req.auth.user._id, pushProvider: String(pushProvider).toUpperCase(), token, platform, appVersion: appVersion || null, lastSeenAt: new Date(), updatedAt: new Date() };
   await getDatabase().collection("notification_devices").updateOne({ userId: device.userId, token }, { $set: device, $setOnInsert: { createdAt: new Date() } }, { upsert: true });
   successResponse(res, device, 201);
 }));

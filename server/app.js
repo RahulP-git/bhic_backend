@@ -14,6 +14,9 @@ import { ensureUserIndexes } from "./models/users.model.js";
 import { ensureChallengeIndexes } from "./models/auth-challenges.model.js";
 import { ensureSessionIndexes } from "./models/sessions.model.js";
 import { ensureSubscriptionIndexes, createPlanIfMissing } from "./models/subscriptions.model.js";
+import { ensureNotificationIndexes } from "./models/notifications.model.js";
+import { ensureWhatsAppIndexes } from "./models/whatsapp-messages.model.js";
+import { startReminderScheduler } from "./jobs/reminder.scheduler.js";
 
 export const createApp = () => {
   const app = express();
@@ -66,15 +69,25 @@ export const createApp = () => {
 
 export const startServer = async () => {
   await connectDatabase();
-  await Promise.all([ensureUserIndexes(), ensureChallengeIndexes(), ensureSessionIndexes(), ensureSubscriptionIndexes(), createPlanIfMissing()]);
+  await Promise.all([
+    ensureUserIndexes(),
+    ensureChallengeIndexes(),
+    ensureSessionIndexes(),
+    ensureSubscriptionIndexes(),
+    ensureNotificationIndexes(),
+    ensureWhatsAppIndexes(),
+    createPlanIfMissing(),
+  ]);
   const app = createApp();
   const server = app.listen(env.port, () => {
     console.log(`Server running at http://localhost:${env.port}`);
     console.log(`API bootstrap: http://localhost:${env.port}/api/v1/app/bootstrap`);
   });
+  const reminderScheduler = startReminderScheduler();
 
   const shutdown = async (signal) => {
     console.log(`${signal} received, closing server`);
+    reminderScheduler.stop();
     server.close(async () => {
       await closeDatabase();
       process.exit(0);

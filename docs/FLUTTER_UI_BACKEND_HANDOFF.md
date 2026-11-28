@@ -974,6 +974,10 @@ POST /api/v1/messages/whatsapp/cycle-reminder
 POST /api/v1/messages/whatsapp/cycle-completed
 ```
 
+The independent backend scheduler creates `CYCLE_REMINDER_ONE_DAY` and `CYCLE_REMINDER_SAME_DAY` events for scheduled cycles using each group's timezone. Each event creates one Manager notification and queues one WhatsApp message for every active member. The cycle and reminder window are part of the dedupe key, so scheduler retries do not create duplicate reminders.
+
+Manager outside-app push notifications use FCM. Flutter must register the current FCM token using `POST /api/v1/notifications/devices` with `pushProvider: "FCM"`. The backend sends push notifications only when `FCM_ENABLED=true`, `FCM_PROJECT_ID` is configured, and Google Application Default Credentials point to a Firebase service-account JSON. Push data includes `notificationType`, `groupId`, and `cycleId` so Flutter can open the relevant notification or cycle screen.
+
 WhatsApp message jobs should return:
 
 - message job ID
